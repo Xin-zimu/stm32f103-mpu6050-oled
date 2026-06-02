@@ -29,6 +29,20 @@
 #define MPU6050_SCL_PIN          GPIO_Pin_10
 #define MPU6050_SDA_PIN          GPIO_Pin_11
 
+/*
+ * I2C driver select:
+ * 0 = software I2C on PB10/PB11, stable default for learning.
+ * 1 = hardware I2C2 on PB10/PB11, experimental branch.
+ */
+#ifndef MPU6050_USE_HW_I2C
+#define MPU6050_USE_HW_I2C       0
+#endif
+
+#define MPU6050_I2C              I2C2
+#define MPU6050_I2C_CLK          RCC_APB1Periph_I2C2
+#define MPU6050_I2C_SPEED        100000
+#define MPU6050_I2C_TIMEOUT      10000
+
 #define MPU6050_ADDR_LOW_WRITE   0xD0
 #define MPU6050_ADDR_LOW_READ    0xD1
 #define MPU6050_ADDR_HIGH_WRITE  0xD2
@@ -70,6 +84,8 @@ static float s_pitch = 0.0f;
 static float s_yaw = 0.0f;
 
 /* 设置 SCL 时钟线电平。level=1 输出高电平, level=0 输出低电平。 */
+#if (MPU6050_USE_HW_I2C == 0)
+
 static void MPU6050_SCL(uint8_t level)
 {
     if (level)
@@ -96,6 +112,21 @@ static void MPU6050_SDA(uint8_t level)
 }
 
 /* 读取 SDA 当前电平。读 ACK 或读数据位时会用到。 */
+static void MPU6050_BusInit(void)
+{
+    GPIO_InitTypeDef GPIO_InitStructure;
+
+    RCC_APB2PeriphClockCmd(MPU6050_GPIO_CLK, ENABLE);
+
+    GPIO_InitStructure.GPIO_Pin = MPU6050_SCL_PIN | MPU6050_SDA_PIN;
+    GPIO_InitStructure.GPIO_Mode = GPIO_Mode_Out_OD;
+    GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
+    GPIO_Init(MPU6050_GPIO_PORT, &GPIO_InitStructure);
+
+    MPU6050_SCL(1);
+    MPU6050_SDA(1);
+}
+
 static uint8_t MPU6050_ReadSDA(void)
 {
     return (uint8_t)GPIO_ReadInputDataBit(MPU6050_GPIO_PORT, MPU6050_SDA_PIN);
@@ -209,14 +240,14 @@ static uint8_t MPU6050_I2C_WriteByte(uint8_t data)
 
     for (i = 0; i < 8; i++)
     {
-        MPU6050_SDA((data & 0x80) ? 1 : 0);
-        data <<= 1;
+        MPU6050_SDA((data & 0x80) ? 1 : 0);                     //取当前最高位
+        data <<= 1;                                             //左移一位，把下一位移动到最高位位置，准备下一轮发送
         MPU6050_I2C_Delay();
         MPU6050_SCL(1);
         MPU6050_I2C_Delay();
         MPU6050_SCL(0);
     }
-
+                                                                //I2C 规则是：SCL 高电平期间，从机读取 SDA 上的数据。
     return MPU6050_I2C_WaitAck();
 }
 
@@ -334,6 +365,193 @@ static uint8_t MPU6050_ReadRegs(uint8_t reg, uint8_t *buf, uint8_t len)
 }
 
 /* 读取单个寄存器, 本质上就是连续读 1 个字节。 */
+#else
+
+static uint8_t MPU6050_I2C_WaitEvent(uint32_t event)
+{
+    uint32_t timeout;
+
+    timeout = MPU6050_I2C_TIMEOUT;
+
+    while (I2C_CheckEvent(MPU6050_I2C, event) != SUCCESS)
+    {
+        if (timeout == 0)
+        {
+            return 0;
+        }
+
+        timeout--;
+    }
+
+    return 1;
+}
+
+static uint8_t MPU6050_I2C_WaitNotBusy(void)
+{
+    uint32_t timeout;
+
+    timeout = MPU6050_I2C_TIMEOUT;
+
+    while (I2C_GetFlagStatus(MPU6050_I2C, I2C_FLAG_BUSY) == SET)
+    {
+        if (timeout == 0)
+        {
+            return 0;
+        }
+
+        timeout--;
+    }
+
+    return 1;
+}
+
+static void MPU6050_BusInit(void)
+{
+    GPIO_InitTypeDef GPIO_InitStructure;
+    I2C_InitTypeDef I2C_InitStructure;
+
+    RCC_APB2PeriphClockCmd(MPU6050_GPIO_CLK, ENABLE);
+    RCC_APB1PeriphClockCmd(MPU6050_I2C_CLK, ENABLE);
+
+    GPIO_InitStructure.GPIO_Pin = MPU6050_SCL_PIN | MPU6050_SDA_PIN;
+    GPIO_InitStructure.GPIO_Mode = GPIO_Mode_AF_OD;
+    GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
+    GPIO_Init(MPU6050_GPIO_PORT, &GPIO_InitStructure);
+
+    I2C_DeInit(MPU6050_I2C);
+
+    I2C_InitStructure.I2C_Mode = I2C_Mode_I2C;
+    I2C_InitStructure.I2C_DutyCycle = I2C_DutyCycle_2;
+    I2C_InitStructure.I2C_OwnAddress1 = 0x00;
+    I2C_InitStructure.I2C_Ack = I2C_Ack_Enable;
+    I2C_InitStructure.I2C_AcknowledgedAddress = I2C_AcknowledgedAddress_7bit;
+    I2C_InitStructure.I2C_ClockSpeed = MPU6050_I2C_SPEED;
+
+    I2C_Init(MPU6050_I2C, &I2C_InitStructure);
+    I2C_Cmd(MPU6050_I2C, ENABLE);
+}
+
+static uint8_t MPU6050_WriteReg(uint8_t reg, uint8_t data)
+{
+    if (MPU6050_I2C_WaitNotBusy() == 0)
+    {
+        return 0;
+    }
+
+    I2C_GenerateSTART(MPU6050_I2C, ENABLE);
+
+    if (MPU6050_I2C_WaitEvent(I2C_EVENT_MASTER_MODE_SELECT) == 0)
+    {
+        I2C_GenerateSTOP(MPU6050_I2C, ENABLE);
+        return 0;
+    }
+
+    I2C_Send7bitAddress(MPU6050_I2C, s_addr_write, I2C_Direction_Transmitter);
+
+    if (MPU6050_I2C_WaitEvent(I2C_EVENT_MASTER_TRANSMITTER_MODE_SELECTED) == 0)
+    {
+        I2C_GenerateSTOP(MPU6050_I2C, ENABLE);
+        return 0;
+    }
+
+    I2C_SendData(MPU6050_I2C, reg);
+
+    if (MPU6050_I2C_WaitEvent(I2C_EVENT_MASTER_BYTE_TRANSMITTED) == 0)
+    {
+        I2C_GenerateSTOP(MPU6050_I2C, ENABLE);
+        return 0;
+    }
+
+    I2C_SendData(MPU6050_I2C, data);
+
+    if (MPU6050_I2C_WaitEvent(I2C_EVENT_MASTER_BYTE_TRANSMITTED) == 0)
+    {
+        I2C_GenerateSTOP(MPU6050_I2C, ENABLE);
+        return 0;
+    }
+
+    I2C_GenerateSTOP(MPU6050_I2C, ENABLE);
+    return 1;
+}
+
+static uint8_t MPU6050_ReadRegs(uint8_t reg, uint8_t *buf, uint8_t len)
+{
+    uint8_t i;
+
+    if ((buf == 0) || (len == 0))
+    {
+        return 0;
+    }
+
+    if (MPU6050_I2C_WaitNotBusy() == 0)
+    {
+        return 0;
+    }
+
+    I2C_AcknowledgeConfig(MPU6050_I2C, ENABLE);
+    I2C_GenerateSTART(MPU6050_I2C, ENABLE);
+
+    if (MPU6050_I2C_WaitEvent(I2C_EVENT_MASTER_MODE_SELECT) == 0)
+    {
+        I2C_GenerateSTOP(MPU6050_I2C, ENABLE);
+        return 0;
+    }
+
+    I2C_Send7bitAddress(MPU6050_I2C, s_addr_write, I2C_Direction_Transmitter);
+
+    if (MPU6050_I2C_WaitEvent(I2C_EVENT_MASTER_TRANSMITTER_MODE_SELECTED) == 0)
+    {
+        I2C_GenerateSTOP(MPU6050_I2C, ENABLE);
+        return 0;
+    }
+
+    I2C_SendData(MPU6050_I2C, reg);
+
+    if (MPU6050_I2C_WaitEvent(I2C_EVENT_MASTER_BYTE_TRANSMITTED) == 0)
+    {
+        I2C_GenerateSTOP(MPU6050_I2C, ENABLE);
+        return 0;
+    }
+
+    I2C_GenerateSTART(MPU6050_I2C, ENABLE);
+
+    if (MPU6050_I2C_WaitEvent(I2C_EVENT_MASTER_MODE_SELECT) == 0)
+    {
+        I2C_GenerateSTOP(MPU6050_I2C, ENABLE);
+        return 0;
+    }
+
+    I2C_Send7bitAddress(MPU6050_I2C, s_addr_read, I2C_Direction_Receiver);
+
+    if (MPU6050_I2C_WaitEvent(I2C_EVENT_MASTER_RECEIVER_MODE_SELECTED) == 0)
+    {
+        I2C_GenerateSTOP(MPU6050_I2C, ENABLE);
+        return 0;
+    }
+
+    for (i = 0; i < len; i++)
+    {
+        if (i == (uint8_t)(len - 1u))
+        {
+            I2C_AcknowledgeConfig(MPU6050_I2C, DISABLE);
+            I2C_GenerateSTOP(MPU6050_I2C, ENABLE);
+        }
+
+        if (MPU6050_I2C_WaitEvent(I2C_EVENT_MASTER_BYTE_RECEIVED) == 0)
+        {
+            I2C_GenerateSTOP(MPU6050_I2C, ENABLE);
+            I2C_AcknowledgeConfig(MPU6050_I2C, ENABLE);
+            return 0;
+        }
+
+        buf[i] = I2C_ReceiveData(MPU6050_I2C);
+    }
+
+    I2C_AcknowledgeConfig(MPU6050_I2C, ENABLE);
+    return 1;
+}
+
+#endif
 static uint8_t MPU6050_ReadReg(uint8_t reg, uint8_t *data)
 {
     return MPU6050_ReadRegs(reg, data, 1);
@@ -344,6 +562,7 @@ static float MPU6050_AbsF(float value)
     return (value < 0.0f) ? -value : value;
 }
 
+//计算浮点数平方根
 static float MPU6050_SqrtF(float value)
 {
     float result;
@@ -593,17 +812,7 @@ static void MPU6050_CalibrateTask(uint32_t now)
  */
 void MPU6050_Init(void)
 {
-    GPIO_InitTypeDef GPIO_InitStructure;
-
-    RCC_APB2PeriphClockCmd(MPU6050_GPIO_CLK, ENABLE);
-
-    GPIO_InitStructure.GPIO_Pin = MPU6050_SCL_PIN | MPU6050_SDA_PIN;
-    GPIO_InitStructure.GPIO_Mode = GPIO_Mode_Out_OD;
-    GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
-    GPIO_Init(MPU6050_GPIO_PORT, &GPIO_InitStructure);
-
-    MPU6050_SCL(1);
-    MPU6050_SDA(1);
+    MPU6050_BusInit();
 
     s_status = MPU6050_STATUS_OFFLINE;
     s_who_am_i = 0;
