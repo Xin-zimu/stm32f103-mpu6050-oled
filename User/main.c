@@ -9,6 +9,9 @@
 #include "app_temp.h"
 #include "joystick.h"
 #include "app_ui.h"
+#include "usart.h"
+#include "app_uart_practice.h"
+#include "mpu6050.h"
 
 int main(void)
 {
@@ -16,6 +19,7 @@ int main(void)
 
     LED_Init();
     Timing_Init();
+    uart_init(115200);
 
     LightSensor_Init();
     LightSensor_ADC_Init();
@@ -23,18 +27,22 @@ int main(void)
     OLED_Init();
     DS18B20_Init();
     Joystick_Init();
+    MPU6050_Init();
 
     OLED_Clear();
 
     App_Light_Init();
     App_Temp_Init();
     App_UI_Init();
+    App_UARTPractice_Init();
 
     while (1)
     {
         App_Light_Task();
         App_Temp_Task();
+        MPU6050_Task();
         Joystick_Task();
         App_UI_Task();
+        App_UARTPractice_Task();
     }
 }

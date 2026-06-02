@@ -1,147 +1,143 @@
-# STM32F103 + OLED + 5D 摇杆交互界面
+# STM32F103 OLED 多传感器工程
 
-本工程实现了一个基于 STM32F103 的小型 OLED 交互界面，使用 5D 摇杆进行菜单控制，并显示光敏、温度和交通灯状态。
+本工程基于 STM32F103C8，已接入 OLED、光敏传感器、DS18B20、5D 摇杆、交通灯 LED、USART1 串口练习程序，以及本次新增的 MPU6050 三维角度传感器。
 
-当前功能：
+## 当前功能
 
-- 128x64 OLED 显示界面
+- 128x64 OLED 状态显示和菜单界面
 - 5D 摇杆菜单控制
-- 光敏传感器 AO/DO 读取
+- 光敏 AO/DO 读取和阈值设置
 - DS18B20 温度读取
 - 红黄绿交通灯控制
-- 非阻塞任务轮询
-- OLED 分区/按行刷新
+- USART1 文本命令交互
+- MPU6050 姿态读取，显示 Roll/Pitch/Yaw
+- 非阻塞主循环任务轮询
 
 ## 引脚接线表
 
-当前代码推荐接线如下：
-
-| 模块 | 信号 | 接 STM32F103 引脚 | 对应代码 |
+| 模块 | 信号 | STM32F103 引脚 | 说明 |
 | --- | --- | --- | --- |
-| OLED | SCL | PB6 / I2C1_SCL | `User/oled.c` |
-| OLED | SDA | PB7 / I2C1_SDA | `User/oled.c` |
-| OLED | VCC | 3.3V | - |
-| OLED | GND | GND | - |
-| 光敏传感器 | AO | PA0 | `User/light_sensor.c` |
-| 光敏传感器 | DO | PA1 | `User/light_sensor.c` |
-| 光敏传感器 | VCC | 3.3V | - |
-| 光敏传感器 | GND | GND | - |
-| 5D 摇杆 | UP/上 | PA2 | `User/joystick.h` |
-| 5D 摇杆 | DOWN/下 | PA3 | `User/joystick.h` |
-| 5D 摇杆 | LEFT/左 | PA4 | `User/joystick.h` |
-| 5D 摇杆 | RIGHT/右 | PB5 | `User/joystick.h` |
-| 5D 摇杆 | PRESS/SW/按压 | PB1 | `User/joystick.h` |
+| OLED | SCL | PB6 / I2C1_SCL | 硬件 I2C1 |
+| OLED | SDA | PB7 / I2C1_SDA | 硬件 I2C1 |
+| OLED | VCC | 3.3V | 不建议接 5V |
+| OLED | GND | GND | 共地 |
+| MPU6050 | SCL | PB10 | 新增，软件 I2C |
+| MPU6050 | SDA | PB11 | 新增，软件 I2C |
+| MPU6050 | VCC | 3.3V | 使用 3.3V 供电 |
+| MPU6050 | GND | GND | 共地 |
+| MPU6050 | AD0 | GND 或悬空 | 默认地址 0x68；代码也兼容 AD0=1 的 0x69 |
+| 光敏传感器 | AO | PA0 | ADC 输入 |
+| 光敏传感器 | DO | PA1 | 数字输入 |
+| 5D 摇杆 | UP | PA2 | 上拉输入，按下为低 |
+| 5D 摇杆 | DOWN | PA3 | 上拉输入，按下为低 |
+| 5D 摇杆 | LEFT | PA4 | 上拉输入，按下为低 |
+| 5D 摇杆 | RIGHT | PB5 | 上拉输入，按下为低 |
+| 5D 摇杆 | PRESS/MID | PB1 | 上拉输入，按下为低 |
 | 5D 摇杆 | COM | GND | 公共端 |
-| 5D 摇杆 | SET | 不接 | 当前未使用 |
-| 5D 摇杆 | RST | 不接 | 当前未使用 |
-| DS18B20 | DQ | PB0 | `User/ds18b20.c` |
-| DS18B20 | VCC | 3.3V | - |
-| DS18B20 | GND | GND | - |
-| 交通灯 LED | 红灯 | PA5 | `User/led.c` |
-| 交通灯 LED | 黄灯 | PA6 | `User/led.c` |
-| 交通灯 LED | 绿灯 | PA7 | `User/led.c` |
+| DS18B20 | DQ | PB0 | 需要上拉 |
+| 交通灯 LED | 红灯 | PA5 | 输出 |
+| 交通灯 LED | 黄灯 | PA6 | 输出 |
+| 交通灯 LED | 绿灯 | PA7 | 输出 |
+| USART1 | TX | PA9 | 接 USB-TTL RXD |
+| USART1 | RX | PA10 | 接 USB-TTL TXD |
+| USART1 | GND | GND | USB-TTL 必须共地 |
 
-注意：
+本次 MPU6050 使用剩余的 `PB10/PB11`，没有占用 OLED 的 `PB6/PB7`，也避开了光敏、温度、摇杆、交通灯和串口已经使用的引脚。
 
-- `PA0` 已经给光敏 AO 使用。
-- `PA1` 已经给光敏 DO 使用。
-- `PB0` 已经给 DS18B20 使用。
-- 所以 5D 摇杆默认没有使用 `PA0`、`PA1`、`PB0`，避免冲突。
+## MPU6050 说明
 
-## 5D 摇杆说明
+新增文件：
 
-你的摇杆引脚为 `COM`、`UP`、`DOWN`、`LFT`、`RHT`、`MID`、`SET`、`RST`。当前代码只使用方向键和中键，接线如下：
+- `User/mpu6050.c`
+- `User/mpu6050.h`
 
-| 摇杆引脚 | 接 STM32F103 |
-| --- | --- |
-| COM | GND |
-| UP | PA2 |
-| DOWN | PA3 |
-| LFT | PA4 |
-| RHT | PB5 |
-| MID | PB1 |
-| SET | 不接 |
-| RST | 不接 |
+MPU6050 配置：
 
-当前摇杆输入使用上拉输入模式：
+- SCL：PB10
+- SDA：PB11
+- 软件 I2C
+- 默认地址：0x68
+- 兼容地址：0x69
+- 加速度量程：+-2g
+- 陀螺仪量程：+-250 dps
+- 更新周期：20 ms
+- 启动校准：200 次陀螺仪零偏采样
 
-- 未按下：高电平
-- 按下：低电平
+上电后 OLED 会短暂显示 `MPU6050 INIT` 和 `KEEP STILL`。这时请保持模块静止，校准完成后进入主界面。
 
-如果你的摇杆模块输出逻辑相反，需要修改 `User/joystick.c` 里的按键读取判断。
+角度输出：
 
-默认按键映射：
+- `ROLL`：横滚角
+- `PITCH`：俯仰角
+- `YAW`：航向角
 
-| 操作 | 引脚 |
-| --- | --- |
-| 上 | PA2 |
-| 下 | PA3 |
-| 左 | PA4 |
-| 右 | PB5 |
-| 按压 | PB1 |
+注意：MPU6050 没有磁力计，`YAW` 只能靠陀螺仪积分，会随时间漂移；`ROLL/PITCH` 使用加速度计和陀螺仪互补滤波，稳定性更好。
 
 ## OLED 界面
 
-### 主菜单
+主界面上半部分显示：
 
-菜单项：
+- MPU 状态：`OK`、`CAL`、`OFF`
+- Roll/Pitch/Yaw 摘要
+- 光照状态
+- 光敏 AO
+- DS18B20 温度
+
+主菜单：
 
 - `STATUS`
 - `SET TH`
 - `TRAFFIC`
+- `MPU6050`
 
 操作：
 
 - 上/下：移动光标
-- 按压：进入选中的页面
+- 按压：进入页面或确认
+- 左：部分页面返回
 
-### 状态页
+### STATUS 页面
 
-显示内容：
+显示光照、AO、温度、MPU 状态、Roll/Pitch。
 
-- 光照状态：`BRIGHT` 或 `DARK`
-- 光敏 AO 数值
-- DS18B20 温度
+按压或左键返回主菜单。
 
-操作：
+### SET TH 页面
 
-- 按压或左：返回主菜单
+显示当前 AO 和光敏阈值。
 
-### 阈值设置页
-
-显示内容：
-
-- 当前 AO 数值
-- 当前光敏阈值
-
-操作：
-
-- 左：阈值减少 50
-- 右：阈值增加 50
+- 左：阈值减 50
+- 右：阈值加 50
 - 按压：保存并返回主菜单
 
-阈值限制在 `User/app_light.c` 中：
+阈值限制在 `300` 到 `3800`。
 
-- 最小值：300
-- 最大值：3800
+### TRAFFIC 页面
 
-### 交通灯控制页
+可选择交通灯模式：
 
-模式：
+- `AUTO`
+- `RED`
+- `YELLOW`
+- `GREEN`
+- `OFF`
 
-- `AUTO`：自动模式，随光敏状态控制红/绿灯
-- `RED`：红灯
-- `YELLOW`：黄灯
-- `GREEN`：绿灯
-- `OFF`：全灭
+按压应用当前模式，左键返回主菜单。
 
-操作：
+### MPU6050 页面
 
-- 上/下：移动光标
-- 按压：应用当前模式
-- 左：返回主菜单
+显示：
 
-## 主循环任务
+- MPU 状态
+- Roll
+- Pitch
+- Yaw
+- MPU6050 内部温度
+- WHO_AM_I 芯片 ID
+
+按压或左键返回主菜单。
+
+## 主循环
 
 主循环位于 `User/main.c`：
 
@@ -150,57 +146,57 @@ while (1)
 {
     App_Light_Task();
     App_Temp_Task();
+    MPU6050_Task();
     Joystick_Task();
     App_UI_Task();
+    App_UARTPractice_Task();
 }
 ```
 
-任务说明：
+## 串口命令
 
-- `App_Light_Task()`：读取光敏 AO，并判断亮/暗状态。
-- `App_Temp_Task()`：非阻塞读取 DS18B20 温度。
-- `Joystick_Task()`：扫描 5D 摇杆，并做去抖处理。
-- `App_UI_Task()`：处理菜单逻辑和 OLED 刷新。
+USART1 参数：
 
-## OLED 刷新策略
+```text
+TX: PA9
+RX: PA10
+波特率: 115200
+数据格式: 8N1
+```
 
-OLED 当前使用硬件 I2C1：
+常用命令：
 
-- SCL：PB6 / I2C1_SCL
-- SDA：PB7 / I2C1_SDA
-- I2C 地址：`0x78`，对应常见 OLED 7 位地址 `0x3C`
-- I2C 速度：`400kHz`
+```text
+HELP
+PING
+ECHO hello
+STATUS
+LED RED
+LED YELLOW
+LED GREEN
+LED OFF
+LED AUTO
+TH?
+TH +
+TH -
+TH 2000
+```
 
-刷新策略：
-
-- 状态数据：500 ms 刷新一次
-- 光标闪烁：500 ms 翻转一次
-- 光标移动：只刷新菜单行
-- 页面切换：清屏后重绘
-
-`OLED_ClearPage()` 用于按页清除，减少整屏刷新次数。
-
-如果 OLED 不显示，优先检查：
-
-- OLED 的 `SCL` 是否接到 `PB6`
-- OLED 的 `SDA` 是否接到 `PB7`
-- OLED 模块是否支持 `0x3C` 地址
-- I2C 是否有上拉电阻，常见为 `4.7k` 上拉到 `3.3V`
-- 如果 400kHz 不稳定，可把 `User/oled.c` 里的 `OLED_I2C_SPEED` 改成 `100000`
+`STATUS` 会输出光敏、温度、交通灯模式和 MPU6050 角度状态。
 
 ## 修改引脚的位置
-
-如果你的实际接线不同，修改这些文件：
 
 | 外设 | 修改文件 |
 | --- | --- |
 | OLED | `User/oled.c` |
+| MPU6050 | `User/mpu6050.c` |
 | 光敏传感器 | `User/light_sensor.c` |
 | DS18B20 | `User/ds18b20.c` |
 | 交通灯 LED | `User/led.c` |
 | 5D 摇杆 | `User/joystick.h` |
+| USART1 | `SYSTEM/usart/usart.c` |
 
-改引脚后要检查是否和已有外设冲突。
+改引脚后要重新检查是否和已有外设冲突。
 
 ## Keil 工程
 
@@ -210,9 +206,25 @@ Keil 工程文件：
 Project/led.uvprojx
 ```
 
-新增 UI 文件已经加入工程：
+本次已加入工程文件：
 
-- `User/app_ui.c`
-- `User/app_ui.h`
-- `User/joystick.c`
-- `User/joystick.h`
+- `User/mpu6050.c`
+- `User/mpu6050.h`
+
+## 调试检查
+
+如果 OLED 显示 `MPU:OFF`：
+
+- 检查 MPU6050 VCC 是否接 3.3V。
+- 检查 GND 是否和 STM32 共地。
+- 检查 SCL 是否接 PB10。
+- 检查 SDA 是否接 PB11。
+- 检查模块是否自带 I2C 上拉电阻；没有上拉时建议 SCL/SDA 各接 4.7k 到 3.3V。
+- 如果 AD0 接高电平，代码会尝试 0x69 地址；如果仍失败，优先检查接线。
+
+如果角度抖动或偏移明显：
+
+- 上电校准时保持 MPU6050 静止。
+- 模块固定后再上电。
+- 远离强振动源。
+- `YAW` 长时间漂移是正常现象，MPU6050 单独无法消除航向漂移。

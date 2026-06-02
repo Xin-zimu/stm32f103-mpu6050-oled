@@ -5,6 +5,7 @@
 #include "app_light.h"
 #include "app_temp.h"
 #include "led.h"
+#include "mpu6050.h"
 
 #define UI_STATUS_REFRESH_MS    500
 #define UI_CURSOR_BLINK_MS      500
@@ -14,6 +15,7 @@
 #define UI_SCREEN_STATUS        1
 #define UI_SCREEN_THRESHOLD     2
 #define UI_SCREEN_TRAFFIC       3
+#define UI_SCREEN_MPU           4
 
 #define UI_TRAFFIC_AUTO         0
 #define UI_TRAFFIC_RED          1
@@ -98,38 +100,157 @@ static void UI_ShowTemp10(uint8_t page, uint8_t column)
     OLED_ShowChar(page, pos, 'C');
 }
 
-static void UI_RenderStatusArea(void)
+static void UI_ShowSignedDeg(uint8_t page, uint8_t column, int16_t angle10, uint8_t show_decimal)
 {
-    OLED_ShowString(0, 0, "LIGHT:");
-    OLED_ShowString(0, 42, "      ");
+    uint16_t value;
+    uint16_t integer;
+    uint8_t decimal;
+    uint8_t pos;
 
-    if (App_Light_IsDark())
+    if (show_decimal)
     {
-        OLED_ShowString(0, 42, "DARK");
+        OLED_ShowString(page, column, "       ");
     }
     else
     {
-        OLED_ShowString(0, 42, "BRIGHT");
+        OLED_ShowString(page, column, "    ");
     }
 
-    OLED_ShowString(1, 0, "AO:");
-    UI_ShowValue4(1, 18, App_Light_GetAO());
+    pos = column;
 
-    OLED_ShowString(2, 0, "TEMP:");
-    UI_ShowTemp10(2, 30);
+    if (angle10 < 0)
+    {
+        OLED_ShowChar(page, pos, '-');
+        value = (uint16_t)(0 - angle10);
+    }
+    else
+    {
+        OLED_ShowChar(page, pos, '+');
+        value = (uint16_t)angle10;
+    }
+
+    pos += 6;
+    integer = value / 10;
+    decimal = (uint8_t)(value % 10);
+
+    if (integer > 999)
+    {
+        integer = 999;
+    }
+
+    OLED_ShowNum(page, pos, integer, 3);
+    pos += 18;
+
+    if (show_decimal)
+    {
+        OLED_ShowChar(page, pos, '.');
+        pos += 6;
+        OLED_ShowNum(page, pos, decimal, 1);
+    }
+}
+
+static void UI_ShowMpuStatus(uint8_t page, uint8_t column)
+{
+    OLED_ShowString(page, column, "     ");
+
+    if (MPU6050_GetStatus() == MPU6050_STATUS_READY)
+    {
+        OLED_ShowString(page, column, "OK");
+    }
+    else if (MPU6050_GetStatus() == MPU6050_STATUS_CALIBRATING)
+    {
+        OLED_ShowString(page, column, "CAL");
+    }
+    else
+    {
+        OLED_ShowString(page, column, "OFF");
+    }
+}
+
+static void UI_ShowMpuTemp10(uint8_t page, uint8_t column)
+{
+    int16_t temp10;
+    uint16_t value;
+    uint16_t integer;
+    uint8_t decimal;
+    uint8_t pos;
+
+    OLED_ShowString(page, column, "       ");
+
+    if (MPU6050_IsOnline() == 0)
+    {
+        OLED_ShowString(page, column, "----");
+        return;
+    }
+
+    temp10 = MPU6050_GetTemp10();
+    pos = column;
+
+    if (temp10 < 0)
+    {
+        OLED_ShowChar(page, pos, '-');
+        pos += 6;
+        value = (uint16_t)(0 - temp10);
+    }
+    else
+    {
+        value = (uint16_t)temp10;
+    }
+
+    integer = value / 10;
+    decimal = (uint8_t)(value % 10);
+
+    OLED_ShowNum(page, pos, integer, 2);
+    pos += 12;
+    OLED_ShowChar(page, pos, '.');
+    pos += 6;
+    OLED_ShowNum(page, pos, decimal, 1);
+    pos += 6;
+    OLED_ShowChar(page, pos, 'C');
+}
+
+static void UI_RenderStatusArea(void)
+{
+    OLED_ShowString(0, 0, "MPU:");
+    UI_ShowMpuStatus(0, 24);
+    OLED_ShowString(0, 48, "R:");
+    UI_ShowSignedDeg(0, 60, MPU6050_GetRoll10(), 0);
+
+    OLED_ShowString(1, 0, "P:");
+    UI_ShowSignedDeg(1, 12, MPU6050_GetPitch10(), 0);
+    OLED_ShowString(1, 48, "Y:");
+    UI_ShowSignedDeg(1, 60, MPU6050_GetYaw10(), 0);
+
+    OLED_ShowString(2, 0, "LIGHT:");
+    OLED_ShowString(2, 42, "      ");
+
+    if (App_Light_IsDark())
+    {
+        OLED_ShowString(2, 42, "DARK");
+    }
+    else
+    {
+        OLED_ShowString(2, 42, "BRIGHT");
+    }
+
+    OLED_ShowString(3, 0, "AO:");
+    UI_ShowValue4(3, 18, App_Light_GetAO());
+    OLED_ShowString(3, 54, "T:");
+    UI_ShowTemp10(3, 66);
 }
 
 static void UI_RenderMenuItems(void)
 {
-    const char *items[3];
+    const char *items[4];
     uint8_t i;
     uint8_t page;
 
     items[0] = "STATUS";
     items[1] = "SET TH";
     items[2] = "TRAFFIC";
+    items[3] = "MPU6050";
 
-    for (i = 0; i < 3; i++)
+    for (i = 0; i < 4; i++)
     {
         page = 4 + i;
         UI_ClearLine(page);
@@ -161,6 +282,9 @@ static void UI_RenderStatusScreen(void)
     OLED_ShowString(2, 0, "LIGHT:");
     OLED_ShowString(3, 0, "AO:");
     OLED_ShowString(4, 0, "TEMP:");
+    OLED_ShowString(5, 0, "MPU:");
+    OLED_ShowString(6, 0, "R:");
+    OLED_ShowString(6, 54, "P:");
     OLED_ShowString(7, 0, "PRESS BACK");
 }
 
@@ -179,6 +303,9 @@ static void UI_RenderStatusPageData(void)
 
     UI_ShowValue4(3, 18, App_Light_GetAO());
     UI_ShowTemp10(4, 30);
+    UI_ShowMpuStatus(5, 30);
+    UI_ShowSignedDeg(6, 12, MPU6050_GetRoll10(), 0);
+    UI_ShowSignedDeg(6, 66, MPU6050_GetPitch10(), 0);
 }
 
 static void UI_RenderThresholdScreen(void)
@@ -235,6 +362,30 @@ static void UI_RenderTrafficScreen(void)
     OLED_ShowString(7, 0, "LEFT BACK");
 }
 
+static void UI_RenderMpuScreen(void)
+{
+    OLED_Clear();
+    OLED_ShowString(0, 0, "MPU6050");
+    OLED_ShowString(1, 0, "STAT:");
+    OLED_ShowString(2, 0, "ROLL:");
+    OLED_ShowString(3, 0, "PITCH:");
+    OLED_ShowString(4, 0, "YAW:");
+    OLED_ShowString(5, 0, "TEMP:");
+    OLED_ShowString(6, 0, "ID:");
+    OLED_ShowString(7, 0, "PRESS BACK");
+}
+
+static void UI_RenderMpuPageData(void)
+{
+    UI_ShowMpuStatus(1, 36);
+    UI_ShowSignedDeg(2, 36, MPU6050_GetRoll10(), 1);
+    UI_ShowSignedDeg(3, 42, MPU6050_GetPitch10(), 1);
+    UI_ShowSignedDeg(4, 30, MPU6050_GetYaw10(), 1);
+    UI_ShowMpuTemp10(5, 36);
+    OLED_ShowString(6, 18, "   ");
+    OLED_ShowNum(6, 18, MPU6050_GetWhoAmI(), 3);
+}
+
 static void UI_EnterScreen(uint8_t screen)
 {
     s_screen = screen;
@@ -281,7 +432,7 @@ static void UI_ProcessMenuEvents(uint8_t events)
         s_cursor_dirty = 1;
     }
 
-    if ((events & JOY_EVENT_DOWN) && (s_menu_index < 2))
+    if ((events & JOY_EVENT_DOWN) && (s_menu_index < 3))
     {
         s_menu_index++;
         s_cursor_dirty = 1;
@@ -297,9 +448,13 @@ static void UI_ProcessMenuEvents(uint8_t events)
         {
             UI_EnterScreen(UI_SCREEN_THRESHOLD);
         }
-        else
+        else if (s_menu_index == 2)
         {
             UI_EnterScreen(UI_SCREEN_TRAFFIC);
+        }
+        else
+        {
+            UI_EnterScreen(UI_SCREEN_MPU);
         }
     }
 }
@@ -381,9 +536,16 @@ static void UI_ProcessEvents(uint8_t events)
     {
         UI_ProcessThresholdEvents(events);
     }
-    else
+    else if (s_screen == UI_SCREEN_TRAFFIC)
     {
         UI_ProcessTrafficEvents(events);
+    }
+    else
+    {
+        if ((events & JOY_EVENT_PRESS) || (events & JOY_EVENT_LEFT))
+        {
+            UI_EnterScreen(UI_SCREEN_MENU);
+        }
     }
 }
 
@@ -436,7 +598,14 @@ void App_UI_Task(void)
         }
         else
         {
-            UI_RenderTrafficScreen();
+            if (s_screen == UI_SCREEN_TRAFFIC)
+            {
+                UI_RenderTrafficScreen();
+            }
+            else
+            {
+                UI_RenderMpuScreen();
+            }
         }
     }
 
@@ -455,6 +624,10 @@ void App_UI_Task(void)
         else if (s_screen == UI_SCREEN_THRESHOLD)
         {
             UI_RenderThresholdData();
+        }
+        else if (s_screen == UI_SCREEN_MPU)
+        {
+            UI_RenderMpuPageData();
         }
     }
 
