@@ -50,18 +50,27 @@
 
 - `User/mpu6050.c`
 - `User/mpu6050.h`
+- `MPU6050_SOFT_I2C_NOTES.md`
 
 MPU6050 配置：
 
 - SCL：PB10
 - SDA：PB11
-- 软件 I2C
+- 默认软件 I2C
 - 默认地址：0x68
 - 兼容地址：0x69
 - 加速度量程：+-2g
 - 陀螺仪量程：+-250 dps
 - 更新周期：20 ms
 - 启动校准：200 次陀螺仪零偏采样
+
+当前 `codex/mpu6050-hw-i2c` 分支同时保留软件 I2C 和硬件 I2C2。默认仍然使用软件 I2C，如果要试硬件 I2C2，把 `User/mpu6050.c` 里的宏改成：
+
+```c
+#define MPU6050_USE_HW_I2C       1
+```
+
+接线仍然是 `PB10=SCL`、`PB11=SDA`。
 
 上电后 OLED 会短暂显示 `MPU6050 INIT` 和 `KEEP STILL`。这时请保持模块静止，校准完成后进入主界面。
 
@@ -72,6 +81,14 @@ MPU6050 配置：
 - `YAW`：航向角
 
 注意：MPU6050 没有磁力计，`YAW` 只能靠陀螺仪积分，会随时间漂移；`ROLL/PITCH` 使用加速度计和陀螺仪互补滤波，稳定性更好。
+
+## 学习文档
+
+| 文档 | 内容 |
+| --- | --- |
+| `MPU6050_SOFT_I2C_NOTES.md` | 软件 I2C 每个函数的逐行注释，适合初学者学习 SCL/SDA、START、STOP、ACK、读写字节 |
+| `MPU6050_I2C_SWITCH.md` | 软件 I2C 和硬件 I2C2 的切换方法 |
+| `MPU6050_UI_QUESTIONS.md` | MPU6050 接入、OLED 页面、状态变量、事件处理、非阻塞设计问题表 |
 
 ## OLED 界面
 
