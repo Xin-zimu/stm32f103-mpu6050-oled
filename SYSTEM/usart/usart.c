@@ -6,6 +6,8 @@
 #include "includes.h"					//ucos 使用	  
 #endif
 //////////////////////////////////////////////////////////////////////////////////	 
+#define USART_TX_TIMEOUT  100000u
+
 //STM32F103ZE核心板
 //串口1初始化		
 ////////////////////////////////////////////////////////////////////////////////// 	  
@@ -30,10 +32,23 @@ void _sys_exit(int x)
 } 
 //重定义fputc函数 
 int fputc(int ch, FILE *f)
-{      
-	while((USART1->SR&0X40)==0);//循环发送,直到发送完毕   
-    USART1->DR = (u8) ch;      
-	return ch;
+{
+    uint32_t timeout;
+
+    timeout = USART_TX_TIMEOUT;
+
+    while ((USART1->SR & 0X40) == 0)
+    {
+        if (timeout == 0)
+        {
+            return ch;
+        }
+
+        timeout--;
+    }
+
+    USART1->DR = (u8) ch;
+    return ch;
 }
 #endif 
 

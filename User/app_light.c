@@ -4,7 +4,8 @@
 #include "led.h"
 
 #define LIGHT_HYSTERESIS      300
-#define LIGHT_CHECK_MS        50
+#define LIGHT_CHECK_MS        200
+#define LIGHT_AO_REPORT_DELTA 20
 #define STATE_STABLE_MS       300
 
 #define STATE_BRIGHT          0
@@ -14,11 +15,22 @@
 static uint32_t s_last_light_time = 0;
 static uint32_t s_pending_start_time = 0;
 static uint16_t s_light_value = 0;
+static uint16_t s_light_filtered_value = 0;
 static uint16_t s_light_threshold = 2000;
 static uint8_t s_light_state = STATE_UNKNOWN;
 static uint8_t s_candidate_state = STATE_UNKNOWN;
 static uint8_t s_pending_state = STATE_UNKNOWN;
 static uint8_t s_auto_traffic = 1;
+
+static uint16_t App_Light_AbsDiff(uint16_t a, uint16_t b)
+{
+    if (a > b)
+    {
+        return (uint16_t)(a - b);
+    }
+
+    return (uint16_t)(b - a);
+}
 
 static void App_Light_ApplyTraffic(uint8_t state)
 {
@@ -40,8 +52,9 @@ static void App_Light_ApplyTraffic(uint8_t state)
 void App_Light_Init(void)
 {
     s_light_value = LightSensor_ReadAO();
+    s_light_filtered_value = s_light_value;
 
-    if (s_light_value < s_light_threshold)
+    if (s_light_filtered_value < s_light_threshold)
     {
         s_light_state = STATE_BRIGHT;
     }
@@ -59,6 +72,7 @@ void App_Light_Init(void)
 void App_Light_Task(void)
 {
     uint32_t now;
+    uint16_t raw_value;
 
     now = Timing_GetTick();
 
@@ -68,19 +82,26 @@ void App_Light_Task(void)
     }
 
     s_last_light_time = now;
-    s_light_value = LightSensor_ReadAO();
+    raw_value = LightSensor_ReadAO();
+    s_light_filtered_value = (uint16_t)(((uint32_t)s_light_filtered_value * 3u + raw_value + 2u) / 4u);
+
+    if (App_Light_AbsDiff(s_light_filtered_value, s_light_value) >= LIGHT_AO_REPORT_DELTA)
+    {
+        s_light_value = s_light_filtered_value;
+    }
+
     s_candidate_state = s_light_state;
 
     if (s_light_state == STATE_BRIGHT)
     {
-        if (s_light_value > (s_light_threshold + LIGHT_HYSTERESIS))
+        if (s_light_filtered_value > (s_light_threshold + LIGHT_HYSTERESIS))
         {
             s_candidate_state = STATE_DARK;
         }
     }
     else if (s_light_state == STATE_DARK)
     {
-        if (s_light_value < (s_light_threshold - LIGHT_HYSTERESIS))
+        if (s_light_filtered_value < (s_light_threshold - LIGHT_HYSTERESIS))
         {
             s_candidate_state = STATE_BRIGHT;
         }
