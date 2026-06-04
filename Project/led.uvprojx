@@ -665,6 +665,16 @@
               <FilePath>..\User\app_uart_practice.h</FilePath>
             </File>
             <File>
+              <FileName>app_attitude_stream.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\User\app_attitude_stream.c</FilePath>
+            </File>
+            <File>
+              <FileName>app_attitude_stream.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\User\app_attitude_stream.h</FilePath>
+            </File>
+            <File>
               <FileName>mpu6050.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\User\mpu6050.c</FilePath>

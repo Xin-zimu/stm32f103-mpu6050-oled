@@ -1,27 +1,10 @@
-#include "mpu6050.h"
-#include "delay.h"
+ï»¿#include "mpu6050.h"
 #include "timing.h"
 
 /*
- * Èí¼þ I2C ËµÃ÷
- *
- * I2C Ö»ÓÐÁ½¸ùÏß:
- * SCL: Ê±ÖÓÏß, ÓÉ STM32 ¿ØÖÆ¸ßµÍµçÆ½, ¾ö¶¨Ê²Ã´Ê±ºò´«Ò»Î»Êý¾Ý¡£
- * SDA: Êý¾ÝÏß, ¼È¿ÉÒÔÓÉ STM32 Êä³ö, Ò²¿ÉÒÔÓÉ MPU6050 À­µÍ»ØÓ¦¡£
- *
- * ËùÎ½Èí¼þ I2C, ¾ÍÊÇ²»Ê¹ÓÃ STM32 ÄÚ²¿µÄ I2C ÍâÉè,
- * ¶øÊÇÓÃÆÕÍ¨ GPIO ÊÖ¶¯Ä£Äâ I2C Ê±Ðò:
- * 1. ÓÃ GPIO_SetBits/GPIO_ResetBits ¿ØÖÆ SCL/SDA¡£
- * 2. ÓÃ delay_us ¿ØÖÆÃ¿¸öµçÆ½±£³ÖµÄÊ±¼ä¡£
- * 3. °´ I2C Ð­ÒéÊÖ¶¯²úÉú START¡¢STOP¡¢Ð´ 8 Î»¡¢¶Á 8 Î»¡¢ACK¡£
- *
- * ±¾¹¤³ÌÑ¡Ôñ PB10/PB11:
- * PB10 ½Ó MPU6050 SCL
- * PB11 ½Ó MPU6050 SDA
- *
- * ×¢Òâ:
- * SCL/SDA ±ØÐëÓÐÉÏÀ­µç×è¡£ºÜ¶à MPU6050 Ä£¿éÒÑ¾­×Ô´øÉÏÀ­,
- * Èç¹ûÍ¨ÐÅ²»ÎÈ¶¨, ¿ÉÒÔÍâ½Ó 4.7k µç×èµ½ 3.3V¡£
+ * MPU6050 uses STM32 hardware I2C2.
+ * PB10 -> I2C2_SCL
+ * PB11 -> I2C2_SDA
  */
 
 #define MPU6050_GPIO_PORT        GPIOB
@@ -29,14 +12,6 @@
 #define MPU6050_SCL_PIN          GPIO_Pin_10
 #define MPU6050_SDA_PIN          GPIO_Pin_11
 
-/*
- * I2C driver select:
- * 0 = software I2C on PB10/PB11, stable default for learning.
- * 1 = hardware I2C2 on PB10/PB11, experimental branch.
- */
-#ifndef MPU6050_USE_HW_I2C
-#define MPU6050_USE_HW_I2C       0
-#endif
 
 #define MPU6050_I2C              I2C2
 #define MPU6050_I2C_CLK          RCC_APB1Periph_I2C2
@@ -58,7 +33,6 @@
 
 #define MPU6050_TASK_MS          20
 #define MPU6050_CALIB_SAMPLES    200
-#define MPU6050_I2C_DELAY_US     4
 
 #define MPU6050_ACC_SCALE        16384.0f
 #define MPU6050_GYRO_SCALE       131.0f
@@ -83,289 +57,6 @@ static float s_roll = 0.0f;
 static float s_pitch = 0.0f;
 static float s_yaw = 0.0f;
 
-/* ÉèÖÃ SCL Ê±ÖÓÏßµçÆ½¡£level=1 Êä³ö¸ßµçÆ½, level=0 Êä³öµÍµçÆ½¡£ */
-#if (MPU6050_USE_HW_I2C == 0)
-
-static void MPU6050_SCL(uint8_t level)
-{
-    if (level)
-    {
-        GPIO_SetBits(MPU6050_GPIO_PORT, MPU6050_SCL_PIN);
-    }
-    else
-    {
-        GPIO_ResetBits(MPU6050_GPIO_PORT, MPU6050_SCL_PIN);
-    }
-}
-
-/* ÉèÖÃ SDA Êý¾ÝÏßµçÆ½¡£¿ªÂ©Êä³öÄ£Ê½ÏÂ, Ð´ 1 µÈÓÚÊÍ·Å×ÜÏß, ÓÉÉÏÀ­µç×èÀ­¸ß¡£ */
-static void MPU6050_SDA(uint8_t level)
-{
-    if (level)
-    {
-        GPIO_SetBits(MPU6050_GPIO_PORT, MPU6050_SDA_PIN);
-    }
-    else
-    {
-        GPIO_ResetBits(MPU6050_GPIO_PORT, MPU6050_SDA_PIN);
-    }
-}
-
-/* ¶ÁÈ¡ SDA µ±Ç°µçÆ½¡£¶Á ACK »ò¶ÁÊý¾ÝÎ»Ê±»áÓÃµ½¡£ */
-static void MPU6050_BusInit(void)
-{
-    GPIO_InitTypeDef GPIO_InitStructure;
-
-    RCC_APB2PeriphClockCmd(MPU6050_GPIO_CLK, ENABLE);
-
-    GPIO_InitStructure.GPIO_Pin = MPU6050_SCL_PIN | MPU6050_SDA_PIN;
-    GPIO_InitStructure.GPIO_Mode = GPIO_Mode_Out_OD;
-    GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
-    GPIO_Init(MPU6050_GPIO_PORT, &GPIO_InitStructure);
-
-    MPU6050_SCL(1);
-    MPU6050_SDA(1);
-}
-
-static uint8_t MPU6050_ReadSDA(void)
-{
-    return (uint8_t)GPIO_ReadInputDataBit(MPU6050_GPIO_PORT, MPU6050_SDA_PIN);
-}
-
-/* Èí¼þ I2C µÄ½ÚÅÄÑÓÊ±¡£ÊýÖµÔ½´ó, I2C Ô½Âýµ«Ô½ÈÝÒ×ÎÈ¶¨¡£ */
-static void MPU6050_I2C_Delay(void)
-{
-    delay_us(MPU6050_I2C_DELAY_US);
-}
-
-/*
- * I2C ÆðÊ¼ÐÅºÅ START
- *
- * ×ÜÏß¿ÕÏÐÊ± SCL=1, SDA=1¡£
- * µ± SCL ±£³Ö¸ßµçÆ½Ê±, SDA ´Ó¸ß±äµÍ, ¾Í±íÊ¾Ò»´Î I2C Í¨ÐÅ¿ªÊ¼¡£
- *
- * Ê±Ðò:
- * SDA=1, SCL=1
- * SDA=0
- * SCL=0
- */
-static void MPU6050_I2C_Start(void)
-{
-    MPU6050_SDA(1);
-    MPU6050_SCL(1);
-    MPU6050_I2C_Delay();
-    MPU6050_SDA(0);
-    MPU6050_I2C_Delay();
-    MPU6050_SCL(0);
-}
-
-/*
- * I2C Í£Ö¹ÐÅºÅ STOP
- *
- * µ± SCL ±£³Ö¸ßµçÆ½Ê±, SDA ´ÓµÍ±ä¸ß, ¾Í±íÊ¾Ò»´Î I2C Í¨ÐÅ½áÊø¡£
- *
- * Ê±Ðò:
- * SDA=0
- * SCL=1
- * SDA=1
- */
-static void MPU6050_I2C_Stop(void)
-{
-    MPU6050_SDA(0);
-    MPU6050_SCL(1);
-    MPU6050_I2C_Delay();
-    MPU6050_SDA(1);
-    MPU6050_I2C_Delay();
-}
-
-/*
- * µÈ´ý´Ó»ú ACK
- *
- * STM32 Ã¿·¢ËÍ 8 Î»ºó, µÚ 9 ¸öÊ±ÖÓÒªÊÍ·Å SDA¡£
- * Èç¹û MPU6050 ÊÕµ½ÁËÕâ¸ö×Ö½Ú, Ëü»á°Ñ SDA À­µÍ, Õâ¾ÍÊÇ ACK¡£
- *
- * ·µ»ØÖµ:
- * 1: ÊÕµ½ ACK, ËµÃ÷Éè±¸»ØÓ¦ÁË¡£
- * 0: Ã»ÊÕµ½ ACK, ¿ÉÄÜÊÇ½ÓÏß´íÎó¡¢µØÖ·´íÎó¡¢Ä£¿éÃ»ÉÏµç»ò×ÜÏßÒì³£¡£
- */
-static uint8_t MPU6050_I2C_WaitAck(void)
-{
-    uint8_t ack;
-
-    MPU6050_SDA(1);
-    MPU6050_I2C_Delay();
-    MPU6050_SCL(1);
-    MPU6050_I2C_Delay();
-    ack = (MPU6050_ReadSDA() == 0) ? 1 : 0;
-    MPU6050_SCL(0);
-
-    return ack;
-}
-
-/*
- * Ö÷»ú·¢ËÍ ACK »ò NACK
- *
- * STM32 ¶Á MPU6050 Êý¾ÝÊ±:
- * - Èç¹ûºóÃæ»¹Òª¼ÌÐø¶Á, ·¢ËÍ ACK, ±íÊ¾"ÎÒ»¹ÒªÏÂÒ»×Ö½Ú"¡£
- * - Èç¹ûÕâÊÇ×îºóÒ»¸ö×Ö½Ú, ·¢ËÍ NACK, ±íÊ¾"¶ÁÍêÁË"¡£
- *
- * ²ÎÊý ack:
- * 1: ·¢ËÍ ACK, SDA À­µÍ¡£
- * 0: ·¢ËÍ NACK, SDA ÊÍ·ÅÎª¸ß¡£
- */
-static void MPU6050_I2C_SendAck(uint8_t ack)
-{
-    MPU6050_SDA(ack ? 0 : 1);
-    MPU6050_I2C_Delay();
-    MPU6050_SCL(1);
-    MPU6050_I2C_Delay();
-    MPU6050_SCL(0);
-    MPU6050_SDA(1);
-}
-
-/*
- * Í¨¹ýÈí¼þ I2C Ð´ 1 ¸ö×Ö½Ú
- *
- * I2C Êý¾Ý°´¸ßÎ»ÔÚÇ°·¢ËÍ, ËùÒÔ´Ó bit7 ¿ªÊ¼¡£
- * Ã¿Ò»Î»µÄ¹ý³Ì:
- * 1. ÏÈ°Ñ SDA ÉèÖÃ³Éµ±Ç°Êý¾ÝÎ»¡£
- * 2. SCL À­¸ß, ÈÃ MPU6050 ¶ÁÈ¡ÕâÒ»Î»¡£
- * 3. SCL À­µÍ, ×¼±¸ÏÂÒ»Î»¡£
- *
- * 8 Î»·¢ÍêºóµÈ´ý MPU6050 »Ø ACK¡£
- */
-static uint8_t MPU6050_I2C_WriteByte(uint8_t data)
-{
-    uint8_t i;
-
-    for (i = 0; i < 8; i++)
-    {
-        MPU6050_SDA((data & 0x80) ? 1 : 0);                     //È¡µ±Ç°×î¸ßÎ»
-        data <<= 1;                                             //×óÒÆÒ»Î»£¬°ÑÏÂÒ»Î»ÒÆ¶¯µ½×î¸ßÎ»Î»ÖÃ£¬×¼±¸ÏÂÒ»ÂÖ·¢ËÍ
-        MPU6050_I2C_Delay();
-        MPU6050_SCL(1);
-        MPU6050_I2C_Delay();
-        MPU6050_SCL(0);
-    }
-                                                                //I2C ¹æÔòÊÇ£ºSCL ¸ßµçÆ½ÆÚ¼ä£¬´Ó»ú¶ÁÈ¡ SDA ÉÏµÄÊý¾Ý¡£
-    return MPU6050_I2C_WaitAck();
-}
-
-/*
- * Í¨¹ýÈí¼þ I2C ¶Á 1 ¸ö×Ö½Ú
- *
- * Ã¿Ò»Î»µÄ¹ý³Ì:
- * 1. SCL À­¸ß¡£
- * 2. STM32 ¶ÁÈ¡ SDA¡£
- * 3. SCL À­µÍ, ×¼±¸ÏÂÒ»Î»¡£
- *
- * 8 Î»¶ÁÍêºó, STM32 ¸ù¾Ý ack ²ÎÊý»Ø¸´ ACK »ò NACK¡£
- */
-static uint8_t MPU6050_I2C_ReadByte(uint8_t ack)
-{
-    uint8_t i;
-    uint8_t data;
-
-    data = 0;
-    MPU6050_SDA(1);
-
-    for (i = 0; i < 8; i++)
-    {
-        data <<= 1;
-        MPU6050_SCL(1);
-        MPU6050_I2C_Delay();
-
-        if (MPU6050_ReadSDA())
-        {
-            data |= 0x01;
-        }
-
-        MPU6050_SCL(0);
-        MPU6050_I2C_Delay();
-    }
-
-    MPU6050_I2C_SendAck(ack);
-    return data;
-}
-
-/*
- * Ð´ MPU6050 µ¥¸ö¼Ä´æÆ÷
- *
- * ÀýÈçÒª»½ÐÑ MPU6050:
- * MPU6050_WriteReg(0x6B, 0x00);
- *
- * I2C Ë³Ðò:
- * START
- * ·¢ËÍÉè±¸Ð´µØÖ·
- * ·¢ËÍ¼Ä´æÆ÷µØÖ·
- * ·¢ËÍÒªÐ´ÈëµÄÊý¾Ý
- * STOP
- */
-static uint8_t MPU6050_WriteReg(uint8_t reg, uint8_t data)
-{
-    uint8_t ok;
-
-    ok = 1;
-    MPU6050_I2C_Start();
-    ok &= MPU6050_I2C_WriteByte(s_addr_write);
-    ok &= MPU6050_I2C_WriteByte(reg);
-    ok &= MPU6050_I2C_WriteByte(data);
-    MPU6050_I2C_Stop();
-
-    return ok;
-}
-
-/*
- * ´Ó MPU6050 Á¬Ðø¶ÁÈ¡¶à¸ö¼Ä´æÆ÷
- *
- * MPU6050 µÄ¼ÓËÙ¶È¡¢ÎÂ¶È¡¢ÍÓÂÝÒÇÊý¾Ý´Ó 0x3B ¿ªÊ¼Á¬ÐøÅÅÁÐ¡£
- * Ò»´Î¶ÁÈ¡ 14 ×Ö½Ú, ¾ÍÄÜÄÃµ½:
- * AccX AccY AccZ Temp GyroX GyroY GyroZ
- *
- * I2C Ë³Ðò:
- * START
- * ·¢ËÍÉè±¸Ð´µØÖ·
- * ·¢ËÍÆðÊ¼¼Ä´æÆ÷µØÖ·
- * ÔÙ·¢Ò»´Î START, ½ÐÖØ¸´ÆðÊ¼
- * ·¢ËÍÉè±¸¶ÁµØÖ·
- * Á¬Ðø¶ÁÈ¡ len ¸ö×Ö½Ú
- * STOP
- */
-static uint8_t MPU6050_ReadRegs(uint8_t reg, uint8_t *buf, uint8_t len)
-{
-    uint8_t i;
-    uint8_t ok;
-
-    if (len == 0)
-    {
-        return 0;
-    }
-
-    ok = 1;
-    MPU6050_I2C_Start();
-    ok &= MPU6050_I2C_WriteByte(s_addr_write);
-    ok &= MPU6050_I2C_WriteByte(reg);
-
-    MPU6050_I2C_Start();
-    ok &= MPU6050_I2C_WriteByte(s_addr_read);
-
-    if (ok == 0)
-    {
-        MPU6050_I2C_Stop();
-        return 0;
-    }
-
-    for (i = 0; i < len; i++)
-    {
-        buf[i] = MPU6050_I2C_ReadByte((i + 1u) < len);
-    }
-
-    MPU6050_I2C_Stop();
-    return 1;
-}
-
-/* ¶ÁÈ¡µ¥¸ö¼Ä´æÆ÷, ±¾ÖÊÉÏ¾ÍÊÇÁ¬Ðø¶Á 1 ¸ö×Ö½Ú¡£ */
-#else
 
 static uint8_t MPU6050_I2C_WaitEvent(uint32_t event)
 {
@@ -551,7 +242,6 @@ static uint8_t MPU6050_ReadRegs(uint8_t reg, uint8_t *buf, uint8_t len)
     return 1;
 }
 
-#endif
 static uint8_t MPU6050_ReadReg(uint8_t reg, uint8_t *data)
 {
     return MPU6050_ReadRegs(reg, data, 1);
@@ -562,7 +252,7 @@ static float MPU6050_AbsF(float value)
     return (value < 0.0f) ? -value : value;
 }
 
-//¼ÆËã¸¡µãÊýÆ½·½¸ù
+//ï¿½ï¿½ï¿½ã¸¡ï¿½ï¿½ï¿½ï¿½Æ½ï¿½ï¿½ï¿½ï¿½
 static float MPU6050_SqrtF(float value)
 {
     float result;
@@ -621,18 +311,18 @@ static int16_t MPU6050_ToInt16(uint8_t high, uint8_t low)
 }
 
 /*
- * ¶ÁÈ¡ MPU6050 Ô­Ê¼Êý¾Ý
+ * ï¿½ï¿½È¡ MPU6050 Ô­Ê¼ï¿½ï¿½ï¿½ï¿½
  *
- * ´Ó 0x3B ¿ªÊ¼Á¬Ðø¶Á 14 ×Ö½Ú:
- * 0~1:   ¼ÓËÙ¶È X
- * 2~3:   ¼ÓËÙ¶È Y
- * 4~5:   ¼ÓËÙ¶È Z
- * 6~7:   ÎÂ¶È
- * 8~9:   ÍÓÂÝÒÇ X
- * 10~11: ÍÓÂÝÒÇ Y
- * 12~13: ÍÓÂÝÒÇ Z
+ * ï¿½ï¿½ 0x3B ï¿½ï¿½Ê¼ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ 14 ï¿½Ö½ï¿½:
+ * 0~1:   ï¿½ï¿½ï¿½Ù¶ï¿½ X
+ * 2~3:   ï¿½ï¿½ï¿½Ù¶ï¿½ Y
+ * 4~5:   ï¿½ï¿½ï¿½Ù¶ï¿½ Z
+ * 6~7:   ï¿½Â¶ï¿½
+ * 8~9:   ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ X
+ * 10~11: ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ Y
+ * 12~13: ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ Z
  *
- * MPU6050 Ã¿¸öÊý¾Ý¶¼ÊÇ 16 Î»ÓÐ·ûºÅÊý, ¸ß×Ö½ÚÔÚÇ°, µÍ×Ö½ÚÔÚºó¡£
+ * MPU6050 Ã¿ï¿½ï¿½ï¿½ï¿½ï¿½Ý¶ï¿½ï¿½ï¿½ 16 Î»ï¿½Ð·ï¿½ï¿½ï¿½ï¿½ï¿½, ï¿½ï¿½ï¿½Ö½ï¿½ï¿½ï¿½Ç°, ï¿½ï¿½ï¿½Ö½ï¿½ï¿½Úºï¿½
  */
 static uint8_t MPU6050_ReadRaw(void)
 {
@@ -655,18 +345,18 @@ static uint8_t MPU6050_ReadRaw(void)
 }
 
 /*
- * ¸ù¾ÝÔ­Ê¼Êý¾Ý¸üÐÂ Roll/Pitch/Yaw
+ * ï¿½ï¿½ï¿½ï¿½Ô­Ê¼ï¿½ï¿½ï¿½Ý¸ï¿½ï¿½ï¿½ Roll/Pitch/Yaw
  *
- * ÕâÀïÊ¹ÓÃ»¥²¹ÂË²¨:
- * - ¼ÓËÙ¶È¼ÆÊÊºÏÐÞÕý Roll/Pitch µÄ³¤ÆÚÎÈ¶¨½Ç¶È¡£
- * - ÍÓÂÝÒÇÊÊºÏÌá¹©¶ÌÊ±¼äÄÚÆ½»¬µÄ½ÇËÙ¶È»ý·Ö¡£
+ * ï¿½ï¿½ï¿½ï¿½Ê¹ï¿½Ã»ï¿½ï¿½ï¿½ï¿½Ë²ï¿½:
+ * - ï¿½ï¿½ï¿½Ù¶È¼ï¿½ï¿½Êºï¿½ï¿½ï¿½ï¿½ï¿½ Roll/Pitch ï¿½Ä³ï¿½ï¿½ï¿½ï¿½È¶ï¿½ï¿½Ç¶È¡ï¿½
+ * - ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Êºï¿½ï¿½á¹©ï¿½ï¿½Ê±ï¿½ï¿½ï¿½ï¿½Æ½ï¿½ï¿½ï¿½Ä½ï¿½ï¿½Ù¶È»ï¿½ï¿½Ö¡ï¿½
  *
  * Roll/Pitch:
  * angle = 0.96 * (old_angle + gyro * dt) + 0.04 * accel_angle
  *
  * Yaw:
- * MPU6050 Ã»ÓÐ´ÅÁ¦¼Æ, Ã»ÓÐ¾ø¶Ô·½Ïò²Î¿¼, ËùÒÔÕâÀïÖ»ÄÜÓÃÍÓÂÝÒÇ Z Öá»ý·Ö¡£
- * Yaw »áËæÊ±¼äÆ¯ÒÆ, ÕâÊÇÕý³£ÏÖÏó¡£
+ * MPU6050 Ã»ï¿½Ð´ï¿½ï¿½ï¿½ï¿½ï¿½, Ã»ï¿½Ð¾ï¿½ï¿½Ô·ï¿½ï¿½ï¿½Î¿ï¿½, ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ö»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ Z ï¿½ï¿½ï¿½ï¿½Ö¡ï¿½
+ * Yaw ï¿½ï¿½ï¿½ï¿½Ê±ï¿½ï¿½Æ¯ï¿½ï¿½, ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
  */
 static void MPU6050_UpdateAngles(uint32_t now)
 {
@@ -721,12 +411,12 @@ static void MPU6050_UpdateAngles(uint32_t now)
 }
 
 /*
- * ¿ªÊ¼ÍÓÂÝÒÇÁãÆ«Ð£×¼
+ * ï¿½ï¿½Ê¼ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Æ«Ð£×¼
  *
- * ÍÓÂÝÒÇ¾²Ö¹Ê±ÀíÂÛÉÏÓ¦¸ÃÊä³ö 0, µ«Êµ¼Ê»áÓÐÆ«²î¡£
- * Ð£×¼¾ÍÊÇÔÚ¾²Ö¹Ê±²É¼¯¶à´Î gyro_x/y/z, ÇóÆ½¾ùÖµ×÷Îª offset¡£
+ * ï¿½ï¿½ï¿½ï¿½ï¿½Ç¾ï¿½Ö¹Ê±ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ó¦ï¿½ï¿½ï¿½ï¿½ï¿½ 0, ï¿½ï¿½Êµï¿½Ê»ï¿½ï¿½ï¿½Æ«ï¿½î¡£
+ * Ð£×¼ï¿½ï¿½ï¿½ï¿½ï¿½Ú¾ï¿½Ö¹Ê±ï¿½É¼ï¿½ï¿½ï¿½ï¿½ gyro_x/y/z, ï¿½ï¿½Æ½ï¿½ï¿½Öµï¿½ï¿½Îª offsetï¿½ï¿½
  *
- * ×¢Òâ: Ð£×¼ÆÚ¼ä MPU6050 ±ØÐë±£³Ö¾²Ö¹¡£
+ * ×¢ï¿½ï¿½: Ð£×¼ï¿½Ú¼ï¿½ MPU6050 ï¿½ï¿½ï¿½ë±£ï¿½Ö¾ï¿½Ö¹ï¿½ï¿½
  */
 static void MPU6050_StartCalibrate(void)
 {
@@ -740,15 +430,15 @@ static void MPU6050_StartCalibrate(void)
 }
 
 /*
- * ·Ç×èÈûÐ£×¼ÈÎÎñ
+ * ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ð£×¼ï¿½ï¿½ï¿½ï¿½
  *
- * ÒÔÇ°Èç¹ûÔÚ MPU6050_Init ÀïÃæÒ»´ÎÐÔ delay+²ÉÑù 200 ´Î,
- * ¿ª»úÊ±»á¿¨×¡Ò»¶ÎÊ±¼ä, Èç¹ûÄ£¿éÒì³£»¹²»ÀûÓÚÅÅ²é¡£
+ * ï¿½ï¿½Ç°ï¿½ï¿½ï¿½ï¿½ï¿½ MPU6050_Init ï¿½ï¿½ï¿½ï¿½Ò»ï¿½ï¿½ï¿½ï¿½ delay+ï¿½ï¿½ï¿½ï¿½ 200 ï¿½ï¿½,
+ * ï¿½ï¿½ï¿½ï¿½Ê±ï¿½á¿¨×¡Ò»ï¿½ï¿½Ê±ï¿½ï¿½, ï¿½ï¿½ï¿½Ä£ï¿½ï¿½ï¿½ì³£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Å²é¡£
  *
- * ÏÖÔÚÃ¿´Î½øÈë MPU6050_Task Ö»Ð£×¼Ò»µãµã:
- * - Ã¿ 3ms ³¢ÊÔ²ÉÑùÒ»´Î¡£
- * - ÀÛ¼Æµ½ 200 ´Îºó¼ÆËãÁãÆ«¡£
- * - Ð£×¼ÆÚ¼äÖ÷Ñ­»·ÈÔÈ»¿ÉÒÔË¢ÐÂ OLED¡¢É¨Ãè°´¼ü¡¢´¦Àí´®¿Ú¡£
+ * ï¿½ï¿½ï¿½ï¿½Ã¿ï¿½Î½ï¿½ï¿½ï¿½ MPU6050_Task Ö»Ð£×¼Ò»ï¿½ï¿½ï¿½:
+ * - Ã¿ 3ms ï¿½ï¿½ï¿½Ô²ï¿½ï¿½ï¿½Ò»ï¿½Î¡ï¿½
+ * - ï¿½Û¼Æµï¿½ 200 ï¿½Îºï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Æ«ï¿½ï¿½
+ * - Ð£×¼ï¿½Ú¼ï¿½ï¿½ï¿½Ñ­ï¿½ï¿½ï¿½ï¿½È»ï¿½ï¿½ï¿½ï¿½Ë¢ï¿½ï¿½ OLEDï¿½ï¿½É¨ï¿½è°´ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ú¡ï¿½
  */
 static void MPU6050_CalibrateTask(uint32_t now)
 {
@@ -800,15 +490,8 @@ static void MPU6050_CalibrateTask(uint32_t now)
 }
 
 /*
- * MPU6050 ³õÊ¼»¯
- *
- * ÕâÀïÖ»×ö"±ØÐëÂíÉÏÍê³É"µÄÊÂÇé:
- * 1. ³õÊ¼»¯ PB10/PB11 Îª¿ªÂ©Êä³ö, ÓÃ×÷Èí¼þ I2C¡£
- * 2. ¶ÁÈ¡ WHO_AM_I ÅÐ¶Ï MPU6050 ÊÇ·ñÔÚÏß¡£
- * 3. ÅäÖÃ²ÉÑùÂÊ¡¢µÍÍ¨ÂË²¨¡¢ÍÓÂÝÒÇÁ¿³Ì¡¢¼ÓËÙ¶ÈÁ¿³Ì¡£
- * 4. Æô¶¯·Ç×èÈûÐ£×¼¡£
- *
- * ²»ÔÚÕâÀï×ö³¤Ê±¼ä delay, ±ÜÃâ¿ª»ú¿¨ËÀ¡£
+ * Initialize MPU6050 through hardware I2C2.
+ * PB10/PB11 are configured as alternate-function open-drain pins.
  */
 void MPU6050_Init(void)
 {
@@ -845,12 +528,12 @@ void MPU6050_Init(void)
 }
 
 /*
- * MPU6050 ÖÜÆÚÈÎÎñ
+ * MPU6050 ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
  *
- * main.c µÄ while(1) »áÒ»Ö±µ÷ÓÃÕâ¸öº¯Êý¡£
- * Èç¹ûÕýÔÚÐ£×¼, ¾ÍÖ´ÐÐÐ£×¼ÈÎÎñ¡£
- * Èç¹ûÒÑ¾­×¼±¸ºÃ, ¾ÍÃ¿ 20ms ¶ÁÈ¡Ò»´ÎÊý¾Ý²¢¸üÐÂ½Ç¶È¡£
- * Èç¹û MPU6050 ÀëÏß, Ö±½Ó·µ»Ø, ²»Ó°ÏìÆäËüÄ£¿éÔËÐÐ¡£
+ * main.c ï¿½ï¿½ while(1) ï¿½ï¿½Ò»Ö±ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+ * ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ð£×¼, ï¿½ï¿½Ö´ï¿½ï¿½Ð£×¼ï¿½ï¿½ï¿½ï¿½
+ * ï¿½ï¿½ï¿½ï¿½Ñ¾ï¿½×¼ï¿½ï¿½ï¿½ï¿½, ï¿½ï¿½Ã¿ 20ms ï¿½ï¿½È¡Ò»ï¿½ï¿½ï¿½ï¿½ï¿½Ý²ï¿½ï¿½ï¿½ï¿½Â½Ç¶È¡ï¿½
+ * ï¿½ï¿½ï¿½ MPU6050 ï¿½ï¿½ï¿½ï¿½, Ö±ï¿½Ó·ï¿½ï¿½ï¿½, ï¿½ï¿½Ó°ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ä£ï¿½ï¿½ï¿½ï¿½ï¿½Ð¡ï¿½
  */
 void MPU6050_Task(void)
 {

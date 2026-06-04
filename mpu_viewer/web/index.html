@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>MPU6050 3D Attitude Viewer</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main id="app">
+      <canvas id="scene"></canvas>
+      <section class="topbar">
+        <div>
+          <h1>MPU6050 3D Attitude Viewer</h1>
+          <p id="lastLine">Waiting for ATT data</p>
+        </div>
+        <div class="status" id="status">Disconnected</div>
+      </section>
+      <section class="telemetry" aria-label="Attitude values">
+        <div>
+          <span>Roll</span>
+          <strong id="roll">0.00</strong>
+        </div>
+        <div>
+          <span>Pitch</span>
+          <strong id="pitch">0.00</strong>
+        </div>
+        <div>
+          <span>Yaw</span>
+          <strong id="yaw">0.00</strong>
+        </div>
+      </section>
+      <section class="footer">
+        <span>Protocol</span>
+        <code>ATT,roll,pitch,yaw</code>
+      </section>
+    </main>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "/vendor/three.module.js"
+        }
+      }
+    </script>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
