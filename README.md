@@ -82,7 +82,6 @@
 
 - `User/mpu6050.c`
 - `User/mpu6050.h`
-- `MPU6050_SOFT_I2C_NOTES.md`
 
 MPU6050 配置：
 
@@ -113,7 +112,6 @@ MPU6050 配置：
 
 | 文档 | 内容 |
 | --- | --- |
-| `MPU6050_SOFT_I2C_NOTES.md` | 软件 I2C 每个函数的逐行注释，适合初学者学习 SCL/SDA、START、STOP、ACK、读写字节 |
 | `MPU6050_I2C_SWITCH.md` | 软件 I2C 和硬件 I2C2 的切换方法 |
 | `MPU6050_UI_QUESTIONS.md` | MPU6050 接入、OLED 页面、状态变量、事件处理、非阻塞设计问题表 |
 
