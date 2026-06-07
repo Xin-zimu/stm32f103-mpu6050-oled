@@ -1,8 +1,8 @@
-ï»¿#include "mpu6050.h"
+#include "mpu6050.h"
 #include "timing.h"
 
 /*
- * MPU6050 uses STM32 hardware I2C2.
+ * MPU6050 Ê¹ÓÃ STM32 Ó²¼þ I2C2¡£
  * PB10 -> I2C2_SCL
  * PB11 -> I2C2_SDA
  */
@@ -17,11 +17,11 @@
 #define MPU6050_I2C_CLK          RCC_APB1Periph_I2C2
 #define MPU6050_I2C_SPEED        100000
 #define MPU6050_I2C_TIMEOUT      10000
+#define MPU6050_I2C_ERROR_MASK   (I2C_SR1_BERR | I2C_SR1_ARLO | \
+                                  I2C_SR1_AF | I2C_SR1_OVR)
 
-#define MPU6050_ADDR_LOW_WRITE   0xD0
-#define MPU6050_ADDR_LOW_READ    0xD1
-#define MPU6050_ADDR_HIGH_WRITE  0xD2
-#define MPU6050_ADDR_HIGH_READ   0xD3
+#define MPU6050_ADDR_LOW         0xD0
+#define MPU6050_ADDR_HIGH        0xD2
 
 #define MPU6050_REG_SMPLRT_DIV   0x19
 #define MPU6050_REG_CONFIG       0x1A
@@ -40,8 +40,7 @@
 
 static uint8_t s_status = MPU6050_STATUS_OFFLINE;
 static uint8_t s_who_am_i = 0;
-static uint8_t s_addr_write = MPU6050_ADDR_LOW_WRITE;
-static uint8_t s_addr_read = MPU6050_ADDR_LOW_READ;
+static uint8_t s_address = MPU6050_ADDR_LOW;
 static uint32_t s_last_sample_time = 0;
 static uint32_t s_last_calib_time = 0;
 static int32_t s_gyro_x_offset = 0;
@@ -66,6 +65,35 @@ static uint8_t MPU6050_I2C_WaitEvent(uint32_t event)
 
     while (I2C_CheckEvent(MPU6050_I2C, event) != SUCCESS)
     {
+        if ((MPU6050_I2C->SR1 & MPU6050_I2C_ERROR_MASK) != 0)
+        {
+            return 0;
+        }
+
+        if (timeout == 0)
+        {
+            return 0;
+        }
+
+        timeout--;
+    }
+
+    return 1;
+}
+
+static uint8_t MPU6050_I2C_WaitFlagSet(uint32_t flag)
+{
+    uint32_t timeout;
+
+    timeout = MPU6050_I2C_TIMEOUT;
+
+    while (I2C_GetFlagStatus(MPU6050_I2C, flag) == RESET)
+    {
+        if ((MPU6050_I2C->SR1 & MPU6050_I2C_ERROR_MASK) != 0)
+        {
+            return 0;
+        }
+
         if (timeout == 0)
         {
             return 0;
@@ -96,6 +124,83 @@ static uint8_t MPU6050_I2C_WaitNotBusy(void)
     return 1;
 }
 
+static uint8_t MPU6050_I2C_WaitStopCleared(void)
+{
+    uint32_t timeout;
+
+    timeout = MPU6050_I2C_TIMEOUT;
+
+    while ((MPU6050_I2C->CR1 & I2C_CR1_STOP) != 0)
+    {
+        if (timeout == 0)
+        {
+            return 0;
+        }
+
+        timeout--;
+    }
+
+    return 1;
+}
+
+static void MPU6050_I2C_ClearErrors(void)
+{
+    MPU6050_I2C->SR1 &= (uint16_t)~MPU6050_I2C_ERROR_MASK;
+}
+
+static void MPU6050_I2C_Abort(void)
+{
+    I2C_GenerateSTOP(MPU6050_I2C, ENABLE);
+    I2C_AcknowledgeConfig(MPU6050_I2C, ENABLE);
+    I2C_NACKPositionConfig(MPU6050_I2C, I2C_NACKPosition_Current);
+    MPU6050_I2C_ClearErrors();
+}
+
+static void MPU6050_BusDelay(void)
+{
+    volatile uint16_t delay;
+
+    for (delay = 0; delay < 100; delay++)
+    {
+    }
+}
+
+static void MPU6050_BusRecover(void)
+{
+    GPIO_InitTypeDef GPIO_InitStructure;
+    uint8_t pulse;
+
+    GPIO_InitStructure.GPIO_Pin = MPU6050_SCL_PIN | MPU6050_SDA_PIN;
+    GPIO_InitStructure.GPIO_Mode = GPIO_Mode_Out_OD;
+    GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
+    GPIO_Init(MPU6050_GPIO_PORT, &GPIO_InitStructure);
+
+    GPIO_SetBits(MPU6050_GPIO_PORT, MPU6050_SCL_PIN | MPU6050_SDA_PIN);
+    MPU6050_BusDelay();
+
+    for (pulse = 0; pulse < 9; pulse++)
+    {
+        if (GPIO_ReadInputDataBit(MPU6050_GPIO_PORT, MPU6050_SDA_PIN) != Bit_RESET)
+        {
+            break;
+        }
+
+        GPIO_ResetBits(MPU6050_GPIO_PORT, MPU6050_SCL_PIN);
+        MPU6050_BusDelay();
+        GPIO_SetBits(MPU6050_GPIO_PORT, MPU6050_SCL_PIN);
+        MPU6050_BusDelay();
+    }
+
+    GPIO_ResetBits(MPU6050_GPIO_PORT, MPU6050_SDA_PIN);
+    MPU6050_BusDelay();
+    GPIO_ResetBits(MPU6050_GPIO_PORT, MPU6050_SCL_PIN);
+    MPU6050_BusDelay();
+    GPIO_SetBits(MPU6050_GPIO_PORT, MPU6050_SCL_PIN);
+    MPU6050_BusDelay();
+    GPIO_SetBits(MPU6050_GPIO_PORT, MPU6050_SDA_PIN);
+    MPU6050_BusDelay();
+}
+
 static void MPU6050_BusInit(void)
 {
     GPIO_InitTypeDef GPIO_InitStructure;
@@ -104,12 +209,17 @@ static void MPU6050_BusInit(void)
     RCC_APB2PeriphClockCmd(MPU6050_GPIO_CLK, ENABLE);
     RCC_APB1PeriphClockCmd(MPU6050_I2C_CLK, ENABLE);
 
+    I2C_Cmd(MPU6050_I2C, DISABLE);
+    MPU6050_BusRecover();
+
     GPIO_InitStructure.GPIO_Pin = MPU6050_SCL_PIN | MPU6050_SDA_PIN;
     GPIO_InitStructure.GPIO_Mode = GPIO_Mode_AF_OD;
     GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
     GPIO_Init(MPU6050_GPIO_PORT, &GPIO_InitStructure);
 
     I2C_DeInit(MPU6050_I2C);
+    I2C_SoftwareResetCmd(MPU6050_I2C, ENABLE);
+    I2C_SoftwareResetCmd(MPU6050_I2C, DISABLE);
 
     I2C_InitStructure.I2C_Mode = I2C_Mode_I2C;
     I2C_InitStructure.I2C_DutyCycle = I2C_DutyCycle_2;
@@ -126,6 +236,7 @@ static uint8_t MPU6050_WriteReg(uint8_t reg, uint8_t data)
 {
     if (MPU6050_I2C_WaitNotBusy() == 0)
     {
+        MPU6050_I2C_Abort();
         return 0;
     }
 
@@ -133,15 +244,15 @@ static uint8_t MPU6050_WriteReg(uint8_t reg, uint8_t data)
 
     if (MPU6050_I2C_WaitEvent(I2C_EVENT_MASTER_MODE_SELECT) == 0)
     {
-        I2C_GenerateSTOP(MPU6050_I2C, ENABLE);
+        MPU6050_I2C_Abort();
         return 0;
     }
 
-    I2C_Send7bitAddress(MPU6050_I2C, s_addr_write, I2C_Direction_Transmitter);
+    I2C_Send7bitAddress(MPU6050_I2C, s_address, I2C_Direction_Transmitter);
 
     if (MPU6050_I2C_WaitEvent(I2C_EVENT_MASTER_TRANSMITTER_MODE_SELECTED) == 0)
     {
-        I2C_GenerateSTOP(MPU6050_I2C, ENABLE);
+        MPU6050_I2C_Abort();
         return 0;
     }
 
@@ -149,7 +260,7 @@ static uint8_t MPU6050_WriteReg(uint8_t reg, uint8_t data)
 
     if (MPU6050_I2C_WaitEvent(I2C_EVENT_MASTER_BYTE_TRANSMITTED) == 0)
     {
-        I2C_GenerateSTOP(MPU6050_I2C, ENABLE);
+        MPU6050_I2C_Abort();
         return 0;
     }
 
@@ -157,7 +268,7 @@ static uint8_t MPU6050_WriteReg(uint8_t reg, uint8_t data)
 
     if (MPU6050_I2C_WaitEvent(I2C_EVENT_MASTER_BYTE_TRANSMITTED) == 0)
     {
-        I2C_GenerateSTOP(MPU6050_I2C, ENABLE);
+        MPU6050_I2C_Abort();
         return 0;
     }
 
@@ -167,7 +278,9 @@ static uint8_t MPU6050_WriteReg(uint8_t reg, uint8_t data)
 
 static uint8_t MPU6050_ReadRegs(uint8_t reg, uint8_t *buf, uint8_t len)
 {
-    uint8_t i;
+    uint8_t remaining;
+    uint8_t index;
+    uint32_t primask;
 
     if ((buf == 0) || (len == 0))
     {
@@ -176,23 +289,34 @@ static uint8_t MPU6050_ReadRegs(uint8_t reg, uint8_t *buf, uint8_t len)
 
     if (MPU6050_I2C_WaitNotBusy() == 0)
     {
+        MPU6050_I2C_Abort();
         return 0;
     }
 
     I2C_AcknowledgeConfig(MPU6050_I2C, ENABLE);
+
+    if (len == 2)
+    {
+        I2C_NACKPositionConfig(MPU6050_I2C, I2C_NACKPosition_Next);
+    }
+    else
+    {
+        I2C_NACKPositionConfig(MPU6050_I2C, I2C_NACKPosition_Current);
+    }
+
     I2C_GenerateSTART(MPU6050_I2C, ENABLE);
 
     if (MPU6050_I2C_WaitEvent(I2C_EVENT_MASTER_MODE_SELECT) == 0)
     {
-        I2C_GenerateSTOP(MPU6050_I2C, ENABLE);
+        MPU6050_I2C_Abort();
         return 0;
     }
 
-    I2C_Send7bitAddress(MPU6050_I2C, s_addr_write, I2C_Direction_Transmitter);
+    I2C_Send7bitAddress(MPU6050_I2C, s_address, I2C_Direction_Transmitter);
 
     if (MPU6050_I2C_WaitEvent(I2C_EVENT_MASTER_TRANSMITTER_MODE_SELECTED) == 0)
     {
-        I2C_GenerateSTOP(MPU6050_I2C, ENABLE);
+        MPU6050_I2C_Abort();
         return 0;
     }
 
@@ -200,7 +324,7 @@ static uint8_t MPU6050_ReadRegs(uint8_t reg, uint8_t *buf, uint8_t len)
 
     if (MPU6050_I2C_WaitEvent(I2C_EVENT_MASTER_BYTE_TRANSMITTED) == 0)
     {
-        I2C_GenerateSTOP(MPU6050_I2C, ENABLE);
+        MPU6050_I2C_Abort();
         return 0;
     }
 
@@ -208,37 +332,114 @@ static uint8_t MPU6050_ReadRegs(uint8_t reg, uint8_t *buf, uint8_t len)
 
     if (MPU6050_I2C_WaitEvent(I2C_EVENT_MASTER_MODE_SELECT) == 0)
     {
-        I2C_GenerateSTOP(MPU6050_I2C, ENABLE);
+        MPU6050_I2C_Abort();
         return 0;
     }
 
-    I2C_Send7bitAddress(MPU6050_I2C, s_addr_read, I2C_Direction_Receiver);
+    I2C_Send7bitAddress(MPU6050_I2C, s_address, I2C_Direction_Receiver);
 
-    if (MPU6050_I2C_WaitEvent(I2C_EVENT_MASTER_RECEIVER_MODE_SELECTED) == 0)
+    /*
+     * ´Ë´¦²»ÄÜÊ¹ÓÃ I2C_EVENT_MASTER_RECEIVER_MODE_SELECTED¡£
+     * I2C_CheckEvent() »á¶ÁÈ¡ SR2 ²¢Çå³ý ADDR£¬¶ø STM32F1 ÔÚ½ÓÊÕµ¥×Ö½Ú
+     * »òË«×Ö½ÚÊ±£¬±ØÐëÏÈÅäÖÃ ACK¡¢POS ºÍ STOP£¬ÔÙÇå³ý ADDR¡£
+     */
+    if (MPU6050_I2C_WaitFlagSet(I2C_FLAG_ADDR) == 0)
     {
-        I2C_GenerateSTOP(MPU6050_I2C, ENABLE);
+        MPU6050_I2C_Abort();
         return 0;
     }
 
-    for (i = 0; i < len; i++)
+    if (len == 1)
     {
-        if (i == (uint8_t)(len - 1u))
-        {
-            I2C_AcknowledgeConfig(MPU6050_I2C, DISABLE);
-            I2C_GenerateSTOP(MPU6050_I2C, ENABLE);
-        }
+        primask = __get_PRIMASK();
+        __disable_irq();
+        I2C_AcknowledgeConfig(MPU6050_I2C, DISABLE);
+        (void)MPU6050_I2C->SR1;
+        (void)MPU6050_I2C->SR2;
+        I2C_GenerateSTOP(MPU6050_I2C, ENABLE);
+        __set_PRIMASK(primask);
 
-        if (MPU6050_I2C_WaitEvent(I2C_EVENT_MASTER_BYTE_RECEIVED) == 0)
+        if (MPU6050_I2C_WaitFlagSet(I2C_FLAG_RXNE) == 0)
         {
-            I2C_GenerateSTOP(MPU6050_I2C, ENABLE);
-            I2C_AcknowledgeConfig(MPU6050_I2C, ENABLE);
+            MPU6050_I2C_Abort();
             return 0;
         }
 
-        buf[i] = I2C_ReceiveData(MPU6050_I2C);
+        buf[0] = I2C_ReceiveData(MPU6050_I2C);
+    }
+    else if (len == 2)
+    {
+        primask = __get_PRIMASK();
+        __disable_irq();
+        (void)MPU6050_I2C->SR1;
+        (void)MPU6050_I2C->SR2;
+        I2C_AcknowledgeConfig(MPU6050_I2C, DISABLE);
+        __set_PRIMASK(primask);
+
+        if (MPU6050_I2C_WaitFlagSet(I2C_FLAG_BTF) == 0)
+        {
+            MPU6050_I2C_Abort();
+            return 0;
+        }
+
+        primask = __get_PRIMASK();
+        __disable_irq();
+        I2C_GenerateSTOP(MPU6050_I2C, ENABLE);
+        buf[0] = I2C_ReceiveData(MPU6050_I2C);
+        buf[1] = I2C_ReceiveData(MPU6050_I2C);
+        __set_PRIMASK(primask);
+    }
+    else
+    {
+        (void)MPU6050_I2C->SR1;
+        (void)MPU6050_I2C->SR2;
+        remaining = len;
+        index = 0;
+
+        while (remaining > 3)
+        {
+            if (MPU6050_I2C_WaitFlagSet(I2C_FLAG_RXNE) == 0)
+            {
+                MPU6050_I2C_Abort();
+                return 0;
+            }
+
+            buf[index++] = I2C_ReceiveData(MPU6050_I2C);
+            remaining--;
+        }
+
+        if (MPU6050_I2C_WaitFlagSet(I2C_FLAG_BTF) == 0)
+        {
+            MPU6050_I2C_Abort();
+            return 0;
+        }
+
+        primask = __get_PRIMASK();
+        __disable_irq();
+        I2C_AcknowledgeConfig(MPU6050_I2C, DISABLE);
+        buf[index++] = I2C_ReceiveData(MPU6050_I2C);
+
+        if (MPU6050_I2C_WaitFlagSet(I2C_FLAG_BTF) == 0)
+        {
+            __set_PRIMASK(primask);
+            MPU6050_I2C_Abort();
+            return 0;
+        }
+
+        I2C_GenerateSTOP(MPU6050_I2C, ENABLE);
+        buf[index++] = I2C_ReceiveData(MPU6050_I2C);
+        __set_PRIMASK(primask);
+        buf[index] = I2C_ReceiveData(MPU6050_I2C);
+    }
+
+    if (MPU6050_I2C_WaitStopCleared() == 0)
+    {
+        MPU6050_I2C_Abort();
+        return 0;
     }
 
     I2C_AcknowledgeConfig(MPU6050_I2C, ENABLE);
+    I2C_NACKPositionConfig(MPU6050_I2C, I2C_NACKPosition_Current);
     return 1;
 }
 
@@ -252,7 +453,7 @@ static float MPU6050_AbsF(float value)
     return (value < 0.0f) ? -value : value;
 }
 
-//ï¿½ï¿½ï¿½ã¸¡ï¿½ï¿½ï¿½ï¿½Æ½ï¿½ï¿½ï¿½ï¿½
+/* Ê¹ÓÃÅ£¶Ùµü´ú·¨¼ÆËã¸¡µãÊýÆ½·½¸ù¡£ */
 static float MPU6050_SqrtF(float value)
 {
     float result;
@@ -311,18 +512,18 @@ static int16_t MPU6050_ToInt16(uint8_t high, uint8_t low)
 }
 
 /*
- * ï¿½ï¿½È¡ MPU6050 Ô­Ê¼ï¿½ï¿½ï¿½ï¿½
+ * ¶ÁÈ¡ MPU6050 Ô­Ê¼Êý¾Ý¡£
  *
- * ï¿½ï¿½ 0x3B ï¿½ï¿½Ê¼ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ 14 ï¿½Ö½ï¿½:
- * 0~1:   ï¿½ï¿½ï¿½Ù¶ï¿½ X
- * 2~3:   ï¿½ï¿½ï¿½Ù¶ï¿½ Y
- * 4~5:   ï¿½ï¿½ï¿½Ù¶ï¿½ Z
- * 6~7:   ï¿½Â¶ï¿½
- * 8~9:   ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ X
- * 10~11: ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ Y
- * 12~13: ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ Z
+ * ´Ó 0x3B ¿ªÊ¼Á¬Ðø¶ÁÈ¡ 14 ×Ö½Ú£º
+ * 0~1:   ¼ÓËÙ¶È X
+ * 2~3:   ¼ÓËÙ¶È Y
+ * 4~5:   ¼ÓËÙ¶È Z
+ * 6~7:   ÎÂ¶È
+ * 8~9:   ÍÓÂÝÒÇ X
+ * 10~11: ÍÓÂÝÒÇ Y
+ * 12~13: ÍÓÂÝÒÇ Z
  *
- * MPU6050 Ã¿ï¿½ï¿½ï¿½ï¿½ï¿½Ý¶ï¿½ï¿½ï¿½ 16 Î»ï¿½Ð·ï¿½ï¿½ï¿½ï¿½ï¿½, ï¿½ï¿½ï¿½Ö½ï¿½ï¿½ï¿½Ç°, ï¿½ï¿½ï¿½Ö½ï¿½ï¿½Úºï¿½
+ * Ã¿ÏîÊý¾Ý¶¼ÊÇ 16 Î»ÓÐ·ûºÅÊý£¬¸ß×Ö½ÚÔÚÇ°£¬µÍ×Ö½ÚÔÚºó¡£
  */
 static uint8_t MPU6050_ReadRaw(void)
 {
@@ -345,18 +546,18 @@ static uint8_t MPU6050_ReadRaw(void)
 }
 
 /*
- * ï¿½ï¿½ï¿½ï¿½Ô­Ê¼ï¿½ï¿½ï¿½Ý¸ï¿½ï¿½ï¿½ Roll/Pitch/Yaw
+ * ¸ù¾ÝÔ­Ê¼Êý¾Ý¸üÐÂ Roll¡¢Pitch ºÍ Yaw¡£
  *
- * ï¿½ï¿½ï¿½ï¿½Ê¹ï¿½Ã»ï¿½ï¿½ï¿½ï¿½Ë²ï¿½:
- * - ï¿½ï¿½ï¿½Ù¶È¼ï¿½ï¿½Êºï¿½ï¿½ï¿½ï¿½ï¿½ Roll/Pitch ï¿½Ä³ï¿½ï¿½ï¿½ï¿½È¶ï¿½ï¿½Ç¶È¡ï¿½
- * - ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Êºï¿½ï¿½á¹©ï¿½ï¿½Ê±ï¿½ï¿½ï¿½ï¿½Æ½ï¿½ï¿½ï¿½Ä½ï¿½ï¿½Ù¶È»ï¿½ï¿½Ö¡ï¿½
+ * Roll ºÍ Pitch Ê¹ÓÃ»¥²¹ÂË²¨£º
+ * - ¼ÓËÙ¶È¼ÆÌá¹©³¤ÆÚÎÈ¶¨µÄÇã½Ç²Î¿¼¡£
+ * - ÍÓÂÝÒÇÌá¹©¶ÌÊ±¼äÄÚÆ½»¬µÄ½ÇËÙ¶È»ý·Ö¡£
  *
  * Roll/Pitch:
  * angle = 0.96 * (old_angle + gyro * dt) + 0.04 * accel_angle
  *
  * Yaw:
- * MPU6050 Ã»ï¿½Ð´ï¿½ï¿½ï¿½ï¿½ï¿½, Ã»ï¿½Ð¾ï¿½ï¿½Ô·ï¿½ï¿½ï¿½Î¿ï¿½, ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ö»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ Z ï¿½ï¿½ï¿½ï¿½Ö¡ï¿½
- * Yaw ï¿½ï¿½ï¿½ï¿½Ê±ï¿½ï¿½Æ¯ï¿½ï¿½, ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+ * MPU6050 Ã»ÓÐ´ÅÁ¦¼Æ£¬ÎÞ·¨Ìá¹©¾ø¶Ôº½Ïò²Î¿¼£¬Òò´ËÕâÀïÖ»»ý·ÖÍÓÂÝÒÇ Z Öá¡£
+ * Yaw »áËæÊ±¼äÆ¯ÒÆ£¬ÕâÊÇÕý³£ÏÖÏó¡£
  */
 static void MPU6050_UpdateAngles(uint32_t now)
 {
@@ -411,12 +612,12 @@ static void MPU6050_UpdateAngles(uint32_t now)
 }
 
 /*
- * ï¿½ï¿½Ê¼ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Æ«Ð£×¼
+ * ¿ªÊ¼ÍÓÂÝÒÇÁãÆ«Ð£×¼¡£
  *
- * ï¿½ï¿½ï¿½ï¿½ï¿½Ç¾ï¿½Ö¹Ê±ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ó¦ï¿½ï¿½ï¿½ï¿½ï¿½ 0, ï¿½ï¿½Êµï¿½Ê»ï¿½ï¿½ï¿½Æ«ï¿½î¡£
- * Ð£×¼ï¿½ï¿½ï¿½ï¿½ï¿½Ú¾ï¿½Ö¹Ê±ï¿½É¼ï¿½ï¿½ï¿½ï¿½ gyro_x/y/z, ï¿½ï¿½Æ½ï¿½ï¿½Öµï¿½ï¿½Îª offsetï¿½ï¿½
+ * ´«¸ÐÆ÷¾²Ö¹Ê±½ÇËÙ¶ÈÀíÂÛÉÏÓ¦½Ó½ü 0£¬µ«Êµ¼Ê´æÔÚÁãÆ«¡£
+ * Ð£×¼ÆÚ¼ä²É¼¯ gyro_x¡¢gyro_y ºÍ gyro_z£¬²¢½«Æ½¾ùÖµ×÷ÎªÆ«ÒÆÁ¿¡£
  *
- * ×¢ï¿½ï¿½: Ð£×¼ï¿½Ú¼ï¿½ MPU6050 ï¿½ï¿½ï¿½ë±£ï¿½Ö¾ï¿½Ö¹ï¿½ï¿½
+ * ×¢Òâ£ºÐ£×¼ÆÚ¼ä MPU6050 ±ØÐë±£³Ö¾²Ö¹¡£
  */
 static void MPU6050_StartCalibrate(void)
 {
@@ -430,15 +631,14 @@ static void MPU6050_StartCalibrate(void)
 }
 
 /*
- * ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ð£×¼ï¿½ï¿½ï¿½ï¿½
+ * ·Ç×èÈûÐ£×¼ÈÎÎñ¡£
  *
- * ï¿½ï¿½Ç°ï¿½ï¿½ï¿½ï¿½ï¿½ MPU6050_Init ï¿½ï¿½ï¿½ï¿½Ò»ï¿½ï¿½ï¿½ï¿½ delay+ï¿½ï¿½ï¿½ï¿½ 200 ï¿½ï¿½,
- * ï¿½ï¿½ï¿½ï¿½Ê±ï¿½á¿¨×¡Ò»ï¿½ï¿½Ê±ï¿½ï¿½, ï¿½ï¿½ï¿½Ä£ï¿½ï¿½ï¿½ì³£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Å²é¡£
+ * ²»ÔÚ MPU6050_Init ÖÐÑÓÊ±²¢Á¬Ðø²ÉÑù 200 ´Î£¬±ÜÃâ³õÊ¼»¯½×¶Î³¤Ê±¼ä×èÈû¡£
  *
- * ï¿½ï¿½ï¿½ï¿½Ã¿ï¿½Î½ï¿½ï¿½ï¿½ MPU6050_Task Ö»Ð£×¼Ò»ï¿½ï¿½ï¿½:
- * - Ã¿ 3ms ï¿½ï¿½ï¿½Ô²ï¿½ï¿½ï¿½Ò»ï¿½Î¡ï¿½
- * - ï¿½Û¼Æµï¿½ 200 ï¿½Îºï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Æ«ï¿½ï¿½
- * - Ð£×¼ï¿½Ú¼ï¿½ï¿½ï¿½Ñ­ï¿½ï¿½ï¿½ï¿½È»ï¿½ï¿½ï¿½ï¿½Ë¢ï¿½ï¿½ OLEDï¿½ï¿½É¨ï¿½è°´ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ú¡ï¿½
+ * Ã¿´Î½øÈë MPU6050_Task ×î¶àÐ£×¼Ò»¸öÑù±¾£º
+ * - Ã¿ 3ms ³¢ÊÔ²ÉÑùÒ»´Î¡£
+ * - ÀÛ¼Æ 200 ´Îºó¼ÆËãÁãÆ«¡£
+ * - Ð£×¼ÆÚ¼äÖ÷Ñ­»·ÈÔ¿ÉË¢ÐÂ OLED¡¢É¨Ãè°´¼ü²¢´¦Àí´®¿Ú¡£
  */
 static void MPU6050_CalibrateTask(uint32_t now)
 {
@@ -490,8 +690,8 @@ static void MPU6050_CalibrateTask(uint32_t now)
 }
 
 /*
- * Initialize MPU6050 through hardware I2C2.
- * PB10/PB11 are configured as alternate-function open-drain pins.
+ * Í¨¹ýÓ²¼þ I2C2 ³õÊ¼»¯ MPU6050¡£
+ * PB10 ºÍ PB11 ÅäÖÃÎª¸´ÓÃ¿ªÂ©Êä³ö¡£
  */
 void MPU6050_Init(void)
 {
@@ -500,13 +700,11 @@ void MPU6050_Init(void)
     s_status = MPU6050_STATUS_OFFLINE;
     s_who_am_i = 0;
 
-    s_addr_write = MPU6050_ADDR_LOW_WRITE;
-    s_addr_read = MPU6050_ADDR_LOW_READ;
+    s_address = MPU6050_ADDR_LOW;
 
     if (MPU6050_ReadReg(MPU6050_REG_WHO_AM_I, &s_who_am_i) == 0)
     {
-        s_addr_write = MPU6050_ADDR_HIGH_WRITE;
-        s_addr_read = MPU6050_ADDR_HIGH_READ;
+        s_address = MPU6050_ADDR_HIGH;
 
         if (MPU6050_ReadReg(MPU6050_REG_WHO_AM_I, &s_who_am_i) == 0)
         {
@@ -519,21 +717,24 @@ void MPU6050_Init(void)
         return;
     }
 
-    MPU6050_WriteReg(MPU6050_REG_PWR_MGMT_1, 0x00);
-    MPU6050_WriteReg(MPU6050_REG_SMPLRT_DIV, 0x09);
-    MPU6050_WriteReg(MPU6050_REG_CONFIG, 0x03);
-    MPU6050_WriteReg(MPU6050_REG_GYRO_CONFIG, 0x00);
-    MPU6050_WriteReg(MPU6050_REG_ACCEL_CONFIG, 0x00);
+    if ((MPU6050_WriteReg(MPU6050_REG_PWR_MGMT_1, 0x00) == 0) ||
+        (MPU6050_WriteReg(MPU6050_REG_SMPLRT_DIV, 0x09) == 0) ||
+        (MPU6050_WriteReg(MPU6050_REG_CONFIG, 0x03) == 0) ||
+        (MPU6050_WriteReg(MPU6050_REG_GYRO_CONFIG, 0x00) == 0) ||
+        (MPU6050_WriteReg(MPU6050_REG_ACCEL_CONFIG, 0x00) == 0))
+    {
+        return;
+    }
+
     MPU6050_StartCalibrate();
 }
 
 /*
- * MPU6050 ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+ * MPU6050 ÖÜÆÚÈÎÎñ¡£
  *
- * main.c ï¿½ï¿½ while(1) ï¿½ï¿½Ò»Ö±ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
- * ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ð£×¼, ï¿½ï¿½Ö´ï¿½ï¿½Ð£×¼ï¿½ï¿½ï¿½ï¿½
- * ï¿½ï¿½ï¿½ï¿½Ñ¾ï¿½×¼ï¿½ï¿½ï¿½ï¿½, ï¿½ï¿½Ã¿ 20ms ï¿½ï¿½È¡Ò»ï¿½ï¿½ï¿½ï¿½ï¿½Ý²ï¿½ï¿½ï¿½ï¿½Â½Ç¶È¡ï¿½
- * ï¿½ï¿½ï¿½ MPU6050 ï¿½ï¿½ï¿½ï¿½, Ö±ï¿½Ó·ï¿½ï¿½ï¿½, ï¿½ï¿½Ó°ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ä£ï¿½ï¿½ï¿½ï¿½ï¿½Ð¡ï¿½
+ * main.c ÔÚ while(1) ÖÐ³ÖÐøµ÷ÓÃ±¾º¯Êý¡£
+ * ÕýÔÚÐ£×¼Ê±Ö´ÐÐÐ£×¼ÈÎÎñ£»×¼±¸Íê³ÉºóÃ¿ 20ms ¶ÁÈ¡Êý¾Ý²¢¸üÐÂ½Ç¶È¡£
+ * Èç¹û MPU6050 ÀëÏßÔòÖ±½Ó·µ»Ø£¬²»Ó°ÏìÆäËûÄ£¿éÔËÐÐ¡£
  */
 void MPU6050_Task(void)
 {
