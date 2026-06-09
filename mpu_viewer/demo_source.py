@@ -24,6 +24,10 @@ class DemoSource(threading.Thread):
                 pitch=22.0 * math.sin(t * 0.6 + 0.8),
                 yaw=((t * 28.0) % 360.0) - 180.0,
             )
-            line = f"ATT,{attitude.roll:.2f},{attitude.pitch:.2f},{attitude.yaw:.2f}"
+            line = (
+                f"ATT,{round(attitude.roll * 10)},"
+                f"{round(attitude.pitch * 10)},"
+                f"{round(attitude.yaw * 10)}"
+            )
             self.state.update(attitude, source="demo", line=line)
             self.stop_event.wait(0.05)

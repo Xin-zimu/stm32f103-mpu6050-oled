@@ -1,90 +1,84 @@
 #include "app_attitude_stream.h"
 #include "timing.h"
 #include "mpu6050.h"
+#include "uart_tx.h"
 
 #define ATT_STREAM_PERIOD_MS  50
 #define ATT_STATUS_PERIOD_MS  500
-#define ATT_TX_TIMEOUT        100000u
+#define ATT_FRAME_MAX_LEN     32
 
 static uint32_t s_last_send_time = 0;
 static uint32_t s_last_status_time = 0;
 
-static void App_AttitudeStream_SendChar(char ch)
-{
-    uint32_t timeout;
-
-    timeout = ATT_TX_TIMEOUT;
-
-    while ((USART1->SR & 0X40) == 0)
-    {
-        if (timeout == 0)
-        {
-            return;
-        }
-
-        timeout--;
-    }
-
-    USART1->DR = (uint8_t)ch;
-}
-
-static void App_AttitudeStream_SendString(const char *text)
+static uint16_t App_AttitudeStream_AppendText(uint8_t *frame,
+                                              uint16_t pos,
+                                              const char *text)
 {
     while (*text != '\0')
     {
-        App_AttitudeStream_SendChar(*text);
+        frame[pos++] = (uint8_t)*text;
         text++;
     }
+
+    return pos;
 }
 
-static void App_AttitudeStream_SendUInt(uint16_t value)
+static uint16_t App_AttitudeStream_AppendInt16(uint8_t *frame,
+                                               uint16_t pos,
+                                               int16_t value)
 {
-    char buf[5];
-    uint8_t pos;
+    uint8_t digits[5];
+    uint8_t count;
+    int32_t magnitude;
 
-    pos = 0;
-
-    if (value == 0)
+    magnitude = value;
+    if (magnitude < 0)
     {
-        App_AttitudeStream_SendChar('0');
-        return;
+        frame[pos++] = '-';
+        magnitude = -magnitude;
     }
 
-    while ((value > 0) && (pos < sizeof(buf)))
+    count = 0;
+
+    do
     {
-        buf[pos] = (char)('0' + (value % 10u));
-        value /= 10u;
-        pos++;
+        digits[count++] = (uint8_t)('0' + (magnitude % 10));
+        magnitude /= 10;
+    }
+    while (magnitude > 0);
+
+    while (count > 0)
+    {
+        frame[pos++] = digits[--count];
     }
 
-    while (pos > 0)
-    {
-        pos--;
-        App_AttitudeStream_SendChar(buf[pos]);
-    }
+    return pos;
 }
 
-static void App_AttitudeStream_SendAngle(int16_t angle10)
+static void App_AttitudeStream_SendStatus(const char *status)
 {
-    uint16_t value;
-    uint8_t decimal;
+    uint8_t frame[12];
+    uint16_t len;
 
-    if (angle10 < 0)
-    {
-        App_AttitudeStream_SendChar('-');
-        value = (uint16_t)(0 - angle10);
-    }
-    else
-    {
-        value = (uint16_t)angle10;
-    }
+    len = App_AttitudeStream_AppendText(frame, 0, status);
+    (void)UartTx_TryWrite(frame, len);
+}
 
-    decimal = (uint8_t)(value % 10u);
+static void App_AttitudeStream_SendAttitude(void)
+{
+    uint8_t frame[ATT_FRAME_MAX_LEN];
+    uint16_t len;
 
-    App_AttitudeStream_SendUInt(value / 10u);
-    App_AttitudeStream_SendChar('.');
-    App_AttitudeStream_SendChar((char)('0' + decimal));
-    App_AttitudeStream_SendChar('0');
+    len = App_AttitudeStream_AppendText(frame, 0, "ATT,");
+    len = App_AttitudeStream_AppendInt16(frame, len, MPU6050_GetRoll10());
+    frame[len++] = ',';
+    len = App_AttitudeStream_AppendInt16(frame, len, MPU6050_GetPitch10());
+    frame[len++] = ',';
+    len = App_AttitudeStream_AppendInt16(frame, len, MPU6050_GetYaw10());
+    frame[len++] = '\r';
+    frame[len++] = '\n';
+
+    (void)UartTx_TryWrite(frame, len);
 }
 
 void App_AttitudeStream_Init(void)
@@ -109,11 +103,11 @@ void App_AttitudeStream_Task(void)
 
             if (status == MPU6050_STATUS_CALIBRATING)
             {
-                App_AttitudeStream_SendString("STA,CAL\r\n");
+                App_AttitudeStream_SendStatus("STA,CAL\r\n");
             }
             else
             {
-                App_AttitudeStream_SendString("STA,OFF\r\n");
+                App_AttitudeStream_SendStatus("STA,OFF\r\n");
             }
         }
 
@@ -127,11 +121,5 @@ void App_AttitudeStream_Task(void)
 
     s_last_send_time = now;
 
-    App_AttitudeStream_SendString("ATT,");
-    App_AttitudeStream_SendAngle(MPU6050_GetRoll10());
-    App_AttitudeStream_SendChar(',');
-    App_AttitudeStream_SendAngle(MPU6050_GetPitch10());
-    App_AttitudeStream_SendChar(',');
-    App_AttitudeStream_SendAngle(MPU6050_GetYaw10());
-    App_AttitudeStream_SendString("\r\n");
+    App_AttitudeStream_SendAttitude();
 }

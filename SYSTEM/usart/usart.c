@@ -1,13 +1,12 @@
 #include "sys.h"
 #include "usart.h"	  
+#include "uart_tx.h"
 ////////////////////////////////////////////////////////////////////////////////// 	 
 //如果使用ucos,则包括下面的头文件即可.
 #if SYSTEM_SUPPORT_OS
 #include "includes.h"					//ucos 使用	  
 #endif
 //////////////////////////////////////////////////////////////////////////////////	 
-#define USART_TX_TIMEOUT  100000u
-
 //STM32F103ZE核心板
 //串口1初始化		
 ////////////////////////////////////////////////////////////////////////////////// 	  
@@ -33,21 +32,11 @@ void _sys_exit(int x)
 //重定义fputc函数 
 int fputc(int ch, FILE *f)
 {
-    uint32_t timeout;
+    u8 byte;
 
-    timeout = USART_TX_TIMEOUT;
-
-    while ((USART1->SR & 0X40) == 0)
-    {
-        if (timeout == 0)
-        {
-            return ch;
-        }
-
-        timeout--;
-    }
-
-    USART1->DR = (u8) ch;
+    (void)f;
+    byte = (u8)ch;
+    (void)UartTx_TryByte(byte);
     return ch;
 }
 #endif 
@@ -116,6 +105,7 @@ void uart_init(u32 bound){
 	USART_InitStructure.USART_Mode = USART_Mode_Rx | USART_Mode_Tx;	//收发模式
 
   USART_Init(USART1, &USART_InitStructure); //初始化串口1
+  UartTx_Init();
   USART_ITConfig(USART1, USART_IT_RXNE, ENABLE);//开启串口接受中断
   USART_Cmd(USART1, ENABLE);                    //使能串口1 
 
@@ -148,6 +138,7 @@ void USART1_IRQHandler(void)                	//串口1中断服务程序
 				}		 
 			}   		 
      } 
+    UartTx_IRQHandler();
 #if SYSTEM_SUPPORT_OS 	//如果SYSTEM_SUPPORT_OS为真，则需要支持OS.
 	OSIntExit();  											 
 #endif

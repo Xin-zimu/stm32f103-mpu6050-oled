@@ -20,9 +20,9 @@ def parse_attitude_line(line: str) -> Attitude | None:
         return None
 
     try:
-        roll = float(parts[1])
-        pitch = float(parts[2])
-        yaw = float(parts[3])
+        roll = int(parts[1]) / 10.0
+        pitch = int(parts[2]) / 10.0
+        yaw = int(parts[3]) / 10.0
     except ValueError:
         return None
 

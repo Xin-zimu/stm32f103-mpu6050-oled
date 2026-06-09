@@ -25,6 +25,10 @@ Project/Listings/
 *.suo
 *.user
 
+# Python cache
+__pycache__/
+*.pyc
+
 # OS files
 Thumbs.db
 Desktop.ini
